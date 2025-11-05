@@ -6,7 +6,6 @@ nextflow.enable.dsl=2
 // params set in nextflow.config
 
 // import modules
-include { validateParameters; paramsSummaryLog } from 'plugin/nf-schema'
 include { samtools_index as samtools_index_duplex ; samtools_index as samtools_index_normal } from './modules/local/samtools_index'
 
 process PREPROCESS {
@@ -24,8 +23,8 @@ process PREPROCESS {
         path("${meta.id}_dedup.bam.bai"),
         emit: effi
   tuple val(meta),
-        path("${meta.id}_dedup.bam"),
-        path("${meta.id}_dedup.bam.bai"),
+        path("${meta.id}_bundled.bam"),
+        path("${meta.id}_bundled.bam.bai"),
         emit: cov
 
   script:
@@ -36,9 +35,7 @@ process PREPROCESS {
   module load bcftools-1.19/python-3.11.6
 
   # add read bundles
-  bamaddreadbundles \
-    -I $bam \
-    -O ${meta.id}_bundled.bam
+  bamaddreadbundles -I $duplex_bam -O ${meta.id}_bundled.bam
   samtools index ${meta.id}_bundled.bam
 
   # deduplicate
@@ -111,8 +108,8 @@ process COV {
   tuple val(meta), path("tmpNanoSeq/cov/*"), emit: cov
 
   script:
-  def include = params.cov_include ? "--include ${params.cov_include}" : ""
-  def exclude = params.cov_exclude ? "--exclude ${params.cov_exclude}" : ""
+  def cov_include = params.cov_include ? "--include ${params.cov_include}" : ""
+  def cov_exclude = params.cov_exclude ? "--exclude ${params.cov_exclude}" : ""
   """
   # modules
   module add samtools-1.19/python-3.12.0 
@@ -129,8 +126,8 @@ process COV {
     cov \
     -Q ${params.cov_q} \
     --larger ${params.cov_larger} \
-    ${include} \
-    ${exclude}
+    ${cov_include} \
+    ${cov_exclude}
   """
   stub:
   """
@@ -231,7 +228,7 @@ process DSA {
   stub:
   """
   mkdir -p tmpNanoSeq/dsa
-  
+
   """
 }
 
@@ -365,12 +362,6 @@ process POST {
 
 workflow {
 
-  // validate input parameters
-  // validateParameters()
-
-  // print summary of supplied parameters
-  // log.info paramsSummaryLog(workflow)
-
   // get duplex bams
   Channel
     .fromPath(params.samplesheet)
@@ -408,8 +399,6 @@ workflow {
   EFFI(PREPROCESS.out.effi, fasta)
 
   // recombine duplex and normal channels
-  ch_input = PREPROCESS.out.cov.join(samtools_index_normal.out)
-  
   samtools_index_normal.out
     .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
     .join(
@@ -425,9 +414,10 @@ workflow {
   // run nanoseq
   COV(ch_input, fasta)
   PART(COV.out.done, fasta)
-  DSA(PART.out.done, fasta)
-  VAR(DSA.out.done, fasta)
-  INDEL(VAR.out.done, fasta)
-  POST(INDEL.out.done, fasta, post_triNuc)
+  DSA_INTERVALS(PART.out.done, fasta)
+  // DSA(PART.out.done, fasta)
+  // VAR(DSA.out.done, fasta)
+  // INDEL(VAR.out.done, fasta)
+  // POST(INDEL.out.done, fasta, post_triNuc)
 
 }
