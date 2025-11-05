@@ -5,6 +5,9 @@ nextflow.enable.dsl=2
 
 // params set in nextflow.config
 
+// import modules
+include { validateParameters; paramsSummaryLog } from 'plugin/nf-schema'
+
 process PREPROCESS {
   tag "${meta.id}"
   publishDir "${params.out_dir}/${meta.donor_id}/", mode: 'copy'
@@ -74,7 +77,8 @@ process EFFI {
 
 process COV {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/cov/", mode: 'copy'
+  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/cov/",
+    mode: 'copy', pattern: "tmpNanoSeq/cov/*"
 
   input:
   tuple val(meta),
@@ -83,7 +87,10 @@ process COV {
   path(fasta)
 
   output:
-  tuple val(meta), path("tmpNanoSeq/cov/*")
+  tuple val(meta),
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai), emit: done
+  tuple val(meta), path("tmpNanoSeq/cov/*"), emit: cov
 
   script:
   def include = params.cov_include ? "--include ${params.cov_include}" : ""
@@ -105,7 +112,8 @@ process COV {
 
 process PART {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/part/", mode: 'copy'
+  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/part/",
+    mode: 'copy', pattern: "tmpNanoSeq/part/*"
 
   input:
   tuple val(meta),
@@ -113,7 +121,10 @@ process PART {
         path(normal_bam), path(normal_bai)
 
   output:
-  tuple val(meta), path("tmpNanoSeq/part/*")
+  tuple val(meta),
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai), emit: done
+  tuple val(meta), path("tmpNanoSeq/part/*"), emit: part
 
   script:
   """
@@ -130,7 +141,8 @@ process PART {
 
 process DSA {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/dsa/", mode: 'copy'
+  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/dsa/",
+    mode: 'copy', pattern: "tmpNanoSeq/dsa/*"
 
   input:
   tuple val(meta),
@@ -139,7 +151,10 @@ process DSA {
   path(fasta)
 
   output:
-  tuple val(meta), path("tmpNanoSeq/dsa/*")
+  tuple val(meta),
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai), emit: done
+  tuple val(meta), path("tmpNanoSeq/dsa/*"), emit: dsa
 
   script:
   """
@@ -158,7 +173,8 @@ process DSA {
 
 process VAR {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/var/", mode: 'copy'
+  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/var/",
+    mode: 'copy', pattern: "tmpNanoSeq/var/*"
 
   input:
   tuple val(meta),
@@ -167,7 +183,10 @@ process VAR {
   path(fasta)
 
   output:
-  tuple val(meta), path("tmpNanoSeq/var/*")
+  tuple val(meta),
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai), emit: done
+  tuple val(meta), path("tmpNanoSeq/var/*"), emit: var
 
   script:
   """
@@ -196,7 +215,8 @@ process VAR {
 
 process INDEL {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/indel/", mode: 'copy'
+  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/indel/",
+    mode: 'copy', pattern: "tmpNanoSeq/indel/*"
 
   input:
   tuple val(meta),
@@ -205,7 +225,10 @@ process INDEL {
   path(fasta)
 
   output:
-  tuple val(meta), path("tmpNanoSeq/indel/*")
+  tuple val(meta),
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai), emit: done
+  tuple val(meta), path("tmpNanoSeq/indel/*"), emit: indel
 
   script:
   """
@@ -229,7 +252,8 @@ process INDEL {
 
 process POST {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/post/", mode: 'copy'
+  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/post/",
+    mode: 'copy', pattern: "tmpNanoSeq/post/*"
 
   input:
   tuple val(meta),
@@ -239,7 +263,10 @@ process POST {
   path(post_triNuc)
 
   output:
-  tuple val(meta), path("tmpNanoSeq/post/*")
+  tuple val(meta),
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai), emit: done
+  tuple val(meta), path("tmpNanoSeq/post/*"), emit: post
 
   script:
   """
@@ -251,4 +278,44 @@ process POST {
     post \
     --triNuc $post_triNuc
   """
+}
+
+workflow {
+
+  // validate input parameters
+  validateParameters()
+
+  // print summary of supplied parameters
+  log.info paramsSummaryLog(workflow)
+
+  // get input bams
+  Channel
+    .fromPath(params.samplesheet)
+    .splitCsv(header: true)
+    | map { row ->
+            def meta = [donor_id: row.donor_id, id: row.id]
+            [meta,
+             file(row.duplex_bam, checkIfExists: true),
+             file(row.normal_bam, checkIfExists: true)]
+    }
+    | set { ch_input }
+  
+  // get reference files
+  fasta = file(params.fasta, checkIfExists: true)
+  post_triNuc = file(params.post_triNuc, checkIfExists: true)
+
+  // preprocess
+  PREPROCESS(ch_input)
+
+  // effi
+  EFFI(ch_input)
+
+  // run nanoseq
+  COV(ch_input, fasta)
+  PART(COV.out.done)
+  DSA(PART.out.done, fasta)
+  VAR(DSA.out.done, fasta)
+  INDEL(VAR.out.done, fasta)
+  POST(INDEL.out.done, fasta, post_triNuc)
+
 }
