@@ -5,7 +5,6 @@ import os
 import re
 import json
 import pickle
-import time
 import argparse
 from multiprocessing import Pool
 from nanoseq_utils import file_chk, check_dependencies, runCommand, getBAMcontigs
@@ -31,10 +30,6 @@ def main():
     # Arguments
     parser_opt.add_argument('--out', action='store', default='.',
                             help='path of the output files and scratch directory (.)')
-    parser_opt.add_argument('-j', '--index', type=int, action='store',
-                            help='index of the LSF job array. One based')
-    parser_opt.add_argument('-k', '--max_index', type=int,
-                            action='store', help='maximum index of the LSF job array')
     parser_opt.add_argument('-t', '--threads', type=int,
                             action='store', default=1, help='number of threads (1)')
     parser_req.add_argument('-R', '--ref', action='store',
@@ -61,16 +56,6 @@ def main():
     # Check dependencies
     check_dependencies(["bamcov", "bgzip"])
     
-    # Validate arguments
-    if ((args.index is None and args.max_index is not None) or
-            (args.index is not None and args.max_index is None)):
-        sys.exit("Must specify index and max_index for array execution!")
-    
-    jobArray = args.index is not None and args.max_index is not None
-    
-    if jobArray and args.threads > 1:
-        print("Warning: execution with a job array is single threaded so thread argument is ignored")
-    
     # Check files
     ext = os.path.splitext(args.duplex)[1][0:-1] + "i"
     file_chk(args.duplex, ext, "BAM/CRAM", sys.exit)
@@ -78,17 +63,13 @@ def main():
     file_chk(args.normal, ext, "BAM/CRAM", sys.exit)
     file_chk(args.ref, ".fai", "Reference", sys.exit)
     
-    if args.index is not None:
-        time.sleep(args.index)
-    
     tmpDir = args.out + "/tmpNanoSeq"
     for idir in ('cov', 'part', 'dsa', 'var', 'indel', 'post'):
         if not os.path.isdir(tmpDir+'/'+idir):
             os.makedirs(tmpDir+'/'+idir, exist_ok=True)
     
-    if args.index is None or args.index == 1:
-        with open("%s/%s/args.json" % (tmpDir, 'cov'), "w") as jsonOut:
-            json.dump(args.__dict__, jsonOut)
+    with open("%s/%s/args.json" % (tmpDir, 'cov'), "w") as jsonOut:
+        json.dump(args.__dict__, jsonOut)
     
     # Build chromosome dictionary
     if args.exclude is None or args.exclude == "":
@@ -163,9 +144,8 @@ def main():
     print("\nAnalysing contigs: %s\n" % chrList)
     print("Starting cov calculation\n")
     
-    if args.index is None or args.index == 1:
-        with open("%s/cov/nfiles" % (tmpDir), "w") as iofile:
-            iofile.write(str(len(chrList)))
+    with open("%s/cov/nfiles" % (tmpDir), "w") as iofile:
+        iofile.write(str(len(chrList)))
     
     inputs = []
     for ii, ichr in enumerate(chrList):
@@ -175,26 +155,11 @@ def main():
             inputs.append((args.duplex, str(args.Q), str(
                 args.win), ichr, "%s/cov/%s" % (tmpDir, ii + 1)))
     
-    if args.index is None:
-        with open("%s/cov/%s" % (tmpDir, 'gIntervals.dat'), 'wb') as iofile:
-            pickle.dump(gintervals, iofile)
-        with Pool(args.threads) as p:
-            p.starmap(runBamcov, inputs)
-    else:
-        if args.index == 1:
-            with open("%s/cov/%s" % (tmpDir, 'gIntervals.dat'), 'wb') as iofile:
-                pickle.dump(gintervals, iofile)
-        
-        commands = [[] for i in range(args.max_index)]
-        jj = 0
-        for ii in range(len(inputs)):
-            if ii % args.max_index == 0:
-                jj = 0
-            commands[jj].append(
-                "runBamcov(inputs[%s][0], inputs[%s][1], inputs[%s][2], inputs[%s][3], inputs[%s][4])" % (ii, ii, ii, ii, ii))
-            jj += 1
-        for icmd in commands[args.index - 1]:
-            exec(icmd)
+    with open("%s/cov/%s" % (tmpDir, 'gIntervals.dat'), 'wb') as iofile:
+        pickle.dump(gintervals, iofile)
+    
+    with Pool(args.threads) as p:
+        p.starmap(runBamcov, inputs)
     
     print("Completed cov calculation\n")
 
