@@ -7,21 +7,22 @@ nextflow.enable.dsl=2
 
 // import modules
 include { validateParameters; paramsSummaryLog } from 'plugin/nf-schema'
+include { samtools_index } from 'modules/local/samtools_index'
 
 process PREPROCESS {
   tag "${meta.id}"
   publishDir "${params.out_dir}/${meta.donor_id}/", mode: 'copy'
 
   input:
-  tuple val(meta), path(bam)
+  tuple val(meta), path(duplex_bam), path(duplex_bai)
   
   output:
-  tuple val(meta), path("filtered_bam/${meta.id}.bam"),
+  tuple val(meta),
+        path("filtered_bam/${meta.id}.bam"),
         path("filtered_bam/${meta.id}.bam.bai"),
-        emit: filtered_bam
-  tuple val(meta), path("random_read_in_bundle/${meta.id}.bam"),
+        path("random_read_in_bundle/${meta.id}.bam"),
         path("random_read_in_bundle/${meta.id}.bam.bai"),
-        emit: random_read_in_bundle_bam
+        emit: effi
 
   script:
   """
@@ -49,7 +50,9 @@ process EFFI {
   publishDir "${params.out_dir}/${meta.donor_id}/", mode: 'copy'
 
   input:
-  tuple val(meta), path(filtered_bam), path(random_read_in_bundle_bam)
+  tuple val(meta),
+        path(filtered_bam), path(filtered_bai),
+        path(random_read_in_bundle_bam), path(random_read_in_bundle_bai)
   path (fasta)
 
   output:
@@ -127,6 +130,7 @@ process PART {
   tuple val(meta), path("tmpNanoSeq/part/*"), emit: part
 
   script:
+  def excludeBED = params.part_excludeBED ? "--excludeBED ${params.part_excludeBED}" : ""
   """
   # TODO: handle -n 100
   runNanoSeq.py \
@@ -135,7 +139,8 @@ process PART {
     --duplex $duplex_bam \
     --ref $fasta \
     part \
-    --excludeCov ${params.part_excludeCov}
+    --excludeCov ${params.part_excludeCov} \
+    ${excludeBED}
   """
 }
 
@@ -165,8 +170,9 @@ process DSA {
     --ref $fasta \
     dsa \
     --mask ${params.dsa_noise_bed} \
-    -d ${params.d} \
-    -q ${params.q} \
+    -d ${params.dsa_d} \
+    -q ${params.dsa_q} \
+    -M ${params.dsa_M} \
     --no_test
   """
 }
@@ -288,27 +294,39 @@ workflow {
   // print summary of supplied parameters
   log.info paramsSummaryLog(workflow)
 
-  // get input bams
+  // get duplex bams
   Channel
     .fromPath(params.samplesheet)
     .splitCsv(header: true)
     | map { row ->
             def meta = [donor_id: row.donor_id, id: row.id]
-            [meta,
-             file(row.duplex_bam, checkIfExists: true),
-             file(row.normal_bam, checkIfExists: true)]
+            [meta, file(row.duplex_bam, checkIfExists: true)]
     }
-    | set { ch_input }
-  
+    | set { ch_duplex }
+
+  // get normal bams
+  Channel
+    .fromPath(params.samplesheet)
+    .splitCsv(header: true)
+    | map { row ->
+            def meta = [donor_id: row.donor_id, id: row.id]
+            [meta, file(row.normal_bam, checkIfExists: true)]
+    }
+    | set { ch_normal }
+
   // get reference files
   fasta = file(params.fasta, checkIfExists: true)
   post_triNuc = file(params.post_triNuc, checkIfExists: true)
 
-  // preprocess
-  PREPROCESS(ch_input)
+  // index bams
+  ch_duplex_indexed = samtools_index(ch_duplex)
+  ch_normal_indexed = samtools_index(ch_normal)
+
+  // preprocess duplex
+  PREPROCESS(ch_duplex_indexed.out)
 
   // effi
-  EFFI(ch_input)
+  EFFI(PREPROCESS.out.effi, fasta)
 
   // run nanoseq
   COV(ch_input, fasta)
