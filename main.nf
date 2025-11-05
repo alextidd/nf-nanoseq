@@ -7,7 +7,7 @@ nextflow.enable.dsl=2
 
 // import modules
 include { validateParameters; paramsSummaryLog } from 'plugin/nf-schema'
-include { samtools_index } from 'modules/local/samtools_index'
+include { samtools_index as samtools_index_duplex ; samtools_index as samtools_index_normal } from './modules/local/samtools_index'
 
 process PREPROCESS {
   tag "${meta.id}"
@@ -18,11 +18,15 @@ process PREPROCESS {
   
   output:
   tuple val(meta),
-        path("filtered_bam/${meta.id}.bam"),
-        path("filtered_bam/${meta.id}.bam.bai"),
-        path("random_read_in_bundle/${meta.id}.bam"),
-        path("random_read_in_bundle/${meta.id}.bam.bai"),
+        path("${meta.id}_bundled.bam"),
+        path("${meta.id}_bundled.bam.bai"),
+        path("${meta.id}_dedup.bam"),
+        path("${meta.id}_dedup.bam.bai"),
         emit: effi
+  tuple val(meta),
+        path("${meta.id}_dedup.bam"),
+        path("${meta.id}_dedup.bam.bai"),
+        emit: cov
 
   script:
   """
@@ -31,17 +35,22 @@ process PREPROCESS {
   module load samtools-1.19.2/python-3.11.6
   module load bcftools-1.19/python-3.11.6
 
-  # dirs
-  mkdir -p filtered_bam
-  mkdir -p random_read_in_bundle
-
   # add read bundles
-  bamaddreadbundles -I $bam -O filtered_bam/${meta.id}.bam
-  samtools index filtered_bam/${meta.id}.bam
+  bamaddreadbundles \
+    -I $bam \
+    -O ${meta.id}_bundled.bam
+  samtools index ${meta.id}_bundled.bam
 
   # deduplicate
-  randomreadinbundle -I filtered_bam/${meta.id}.bam -O random_read_in_bundle/${meta.id}.bam
-  samtools index random_read_in_bundle/${meta.id}.bam
+  randomreadinbundle -I ${meta.id}_bundled.bam -O ${meta.id}_dedup.bam
+  samtools index ${meta.id}_dedup.bam
+  """
+  stub:
+  """
+  touch ${meta.id}_bundled.bam
+  touch ${meta.id}_bundled.bam.bai
+  touch ${meta.id}_dedup.bam
+  touch ${meta.id}_dedup.bam.bai
   """
 }
 
@@ -51,9 +60,9 @@ process EFFI {
 
   input:
   tuple val(meta),
-        path(filtered_bam), path(filtered_bai),
-        path(random_read_in_bundle_bam), path(random_read_in_bundle_bai)
-  path (fasta)
+        path(bundled_bam), path(bundled_bai),
+        path(filtered_bam), path(filtered_bai)
+  tuple path(fasta), path(fai)
 
   output:
   tuple val(meta), path("efficiency/${meta.id}*")
@@ -71,10 +80,16 @@ process EFFI {
   # calculate efficiency
   efficiency_nanoseq.pl \
     -threads $task.cpus \
-    -duplex $filtered_bam \
-    -dedup $random_read_in_bundle_bam \
+    -duplex $bundled_bam \
+    -dedup $filtered_bam \
     -ref $fasta \
     -out efficiency/${meta.id}
+  """
+  stub:
+  """
+  mkdir -p efficiency
+  touch efficiency/${meta.id}.RBs
+  touch efficiency/${meta.id}.RBs.pdf
   """
 }
 
@@ -87,7 +102,7 @@ process COV {
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
-  path(fasta)
+  tuple path(fasta), path(fai)
 
   output:
   tuple val(meta),
@@ -99,6 +114,12 @@ process COV {
   def include = params.cov_include ? "--include ${params.cov_include}" : ""
   def exclude = params.cov_exclude ? "--exclude ${params.cov_exclude}" : ""
   """
+  # modules
+  module add samtools-1.19/python-3.12.0 
+  module load perl-5.30.0 
+  module load bcftools-1.19/python-3.11.6
+
+  # run
   # TODO: handle -k and -j
   runNanoSeq.py \
     --threads $task.cpus \
@@ -111,6 +132,15 @@ process COV {
     ${include} \
     ${exclude}
   """
+  stub:
+  """
+  mkdir -p tmpNanoSeq/cov
+  touch tmpNanoSeq/cov/1.done
+  touch tmpNanoSeq/cov/1.cov.bed.gz
+  touch tmpNanoSeq/cov/gIntervals.dat
+  touch tmpNanoSeq/cov/args.json
+  touch tmpNanoSeq/cov/nfiles
+  """
 }
 
 process PART {
@@ -122,16 +152,24 @@ process PART {
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
+  tuple path(fasta), path(fai)
 
   output:
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai), emit: done
+  tuple path(fasta), path(fai)
   tuple val(meta), path("tmpNanoSeq/part/*"), emit: part
 
   script:
   def excludeBED = params.part_excludeBED ? "--excludeBED ${params.part_excludeBED}" : ""
   """
+  # modules
+  module add samtools-1.19/python-3.12.0 
+  module load perl-5.30.0 
+  module load bcftools-1.19/python-3.11.6
+
+  # run
   # TODO: handle -n 100
   runNanoSeq.py \
     --threads $task.cpus  \
@@ -139,8 +177,16 @@ process PART {
     --duplex $duplex_bam \
     --ref $fasta \
     part \
+    --jobs ${params.jobs} \
     --excludeCov ${params.part_excludeCov} \
     ${excludeBED}
+  """
+  stub:
+  """
+  mkdir -p tmpNanoSeq/part
+  touch tmpNanoSeq/part/1.done
+  touch tmpNanoSeq/part/intervalsPerCPU.dat
+  touch tmpNanoSeq/part/args.json
   """
 }
 
@@ -153,7 +199,7 @@ process DSA {
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
-  path(fasta)
+  tuple path(fasta), path(fai)
 
   output:
   tuple val(meta),
@@ -163,17 +209,29 @@ process DSA {
 
   script:
   """
+  # modules
+  module add samtools-1.19/python-3.12.0 
+  module load perl-5.30.0 
+  module load bcftools-1.19/python-3.11.6
+
+  # run
   runNanoSeq.py \
     --threads $task.cpus  \
     --normal $normal_bam \
     --duplex $duplex_bam \
     --ref $fasta \
     dsa \
+    --max_index ${params.jobs} \
     --mask ${params.dsa_noise_bed} \
     -d ${params.dsa_d} \
     -q ${params.dsa_q} \
     -M ${params.dsa_M} \
     --no_test
+  """
+  stub:
+  """
+  mkdir -p tmpNanoSeq/dsa
+  
   """
 }
 
@@ -186,7 +244,7 @@ process VAR {
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
-  path(fasta)
+  tuple path(fasta), path(fai)
 
   output:
   tuple val(meta),
@@ -196,12 +254,19 @@ process VAR {
 
   script:
   """
+  # modules
+  module add samtools-1.19/python-3.12.0 
+  module load perl-5.30.0 
+  module load bcftools-1.19/python-3.11.6
+
+  # run
   # TODO: handle -k $LSB_JOBINDEX_END and -j $LSB_JOBINDEX
   runNanoSeq.py \
     --duplex $duplex_bam \
     --normal $normal_bam \
     --ref $fasta \
     var \
+    --max_index ${params.jobs} \
     -a $params.var_a \
     -b $params.var_b \
     -c $params.var_c \
@@ -228,7 +293,7 @@ process INDEL {
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
-  path(fasta)
+  tuple path(fasta), path(fai)
 
   output:
   tuple val(meta),
@@ -238,6 +303,12 @@ process INDEL {
 
   script:
   """
+  # modules
+  module add samtools-1.19/python-3.12.0 
+  module load perl-5.30.0 
+  module load bcftools-1.19/python-3.11.6
+
+  # run
   # TODO: handle -k $LSB_JOBINDEX_END and -j $LSB_JOBINDEX
   runNanoSeq.py \
     --threads $task.cpus  \
@@ -265,7 +336,7 @@ process POST {
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
-  path(fasta)
+  tuple path(fasta), path(fai)
   path(post_triNuc)
 
   output:
@@ -276,6 +347,12 @@ process POST {
 
   script:
   """
+  # modules
+  module add samtools-1.19/python-3.12.0 
+  module load perl-5.30.0 
+  module load bcftools-1.19/python-3.11.6
+
+  # run
   runNanoSeq.py \
     --threads $task.cpus  \
     --normal $normal_bam \
@@ -289,10 +366,10 @@ process POST {
 workflow {
 
   // validate input parameters
-  validateParameters()
+  // validateParameters()
 
   // print summary of supplied parameters
-  log.info paramsSummaryLog(workflow)
+  // log.info paramsSummaryLog(workflow)
 
   // get duplex bams
   Channel
@@ -309,28 +386,45 @@ workflow {
     .fromPath(params.samplesheet)
     .splitCsv(header: true)
     | map { row ->
-            def meta = [donor_id: row.donor_id, id: row.id]
+            def meta = [donor_id: row.donor_id, id: row.donor_id + "_normal"]
             [meta, file(row.normal_bam, checkIfExists: true)]
     }
+    | unique
     | set { ch_normal }
 
   // get reference files
-  fasta = file(params.fasta, checkIfExists: true)
+  fasta = [file(params.fasta, checkIfExists: true),
+           file(params.fasta + ".fai", checkIfExists: true)]
   post_triNuc = file(params.post_triNuc, checkIfExists: true)
 
   // index bams
-  ch_duplex_indexed = samtools_index(ch_duplex)
-  ch_normal_indexed = samtools_index(ch_normal)
+  samtools_index_duplex(ch_duplex)
+  samtools_index_normal(ch_normal)
 
   // preprocess duplex
-  PREPROCESS(ch_duplex_indexed.out)
+  PREPROCESS(samtools_index_duplex.out)
 
   // effi
   EFFI(PREPROCESS.out.effi, fasta)
 
+  // recombine duplex and normal channels
+  ch_input = PREPROCESS.out.cov.join(samtools_index_normal.out)
+  
+  samtools_index_normal.out
+    .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
+    .join(
+        PREPROCESS.out.cov.map { meta, bam, bai -> [ meta.donor_id, [meta, bam, bai] ] }
+    )
+    .map { donor_id, normal, duplex ->
+        def (normal_meta, normal_bam, normal_bai) = normal
+        def (duplex_meta, duplex_bam, duplex_bai) = duplex
+        tuple(duplex_meta, duplex_bam, duplex_bai, normal_bam, normal_bai)
+    }
+    .set { ch_input }
+  
   // run nanoseq
   COV(ch_input, fasta)
-  PART(COV.out.done)
+  PART(COV.out.done, fasta)
   DSA(PART.out.done, fasta)
   VAR(DSA.out.done, fasta)
   INDEL(VAR.out.done, fasta)
