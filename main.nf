@@ -6,7 +6,59 @@ nextflow.enable.dsl=2
 // params set in nextflow.config
 
 // import modules
-include { samtools_index as samtools_index_duplex ; samtools_index as samtools_index_normal } from './modules/local/samtools_index'
+include { SAMTOOLS_INDEX } from './modules/local/SAMTOOLS_INDEX'
+
+process VALIDATE_BAMS {
+  tag "${meta.id}"
+
+  input:
+  tuple val(meta), 
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai)
+  tuple path(fasta), path(fai)
+  
+  output:
+  tuple val(meta), 
+        path(duplex_bam), path(duplex_bai),
+        path(normal_bam), path(normal_bai)
+
+  script:
+  """
+  # modules
+  module load samtools-1.19.2/python-3.11.6
+
+  # validate BAM files are not corrupted
+  samtools quickcheck -v $duplex_bam
+  samtools quickcheck -v $normal_bam
+
+  # extract contig info from BAMs
+  samtools idxstats $normal_bam | cut -f1,2 | grep -v "^\\*" > normal.contigs
+  samtools idxstats $duplex_bam | cut -f1,2 | grep -v "^\\*" > duplex.contigs
+
+  # extract contig info from reference
+  cut -f1,2 $fai > ref.contigs
+
+  # check that normal and duplex BAMs have matching contigs
+  if ! diff normal.contigs duplex.contigs > /dev/null; then
+    echo "ERROR: Normal and duplex BAMs have different contigs or lengths"
+    diff normal.contigs duplex.contigs
+    exit 1
+  fi
+
+  # check that the BAM contigs match the reference contigs
+  if ! diff normal.contigs ref.contigs > /dev/null; then
+    echo "ERROR: BAM contigs do not match reference contigs"
+    diff normal.contigs ref.contigs
+    exit 1
+  fi
+
+  echo "BAM validation passed for ${meta.id}"
+  """
+  stub:
+  """
+  echo "Stub: BAM validation skipped"
+  """
+}
 
 process PREPROCESS {
   tag "${meta.id}"
@@ -90,6 +142,29 @@ process EFFI {
   """
 }
 
+process INTERVALS {
+  input:
+  tuple path(fasta), path(fai)
+
+  output:
+  tuple path("gIntervals.dat"), path("intervals.bed")
+
+  script:
+  def int_include = params.int_include ? "--include ${params.int_include}" : ""
+  def int_exclude = params.int_exclude ? "--exclude ${params.int_exclude}" : ""
+  def int_larger = params.int_larger ? "--larger ${params.int_larger}" : ""
+  """
+  nanoseq_intervals.py \
+    --ref $fasta \
+    $int_include $int_exclude $int_larger
+  """
+  stub:
+  """
+  touch gIntervals.dat
+  touch intervals.bed
+  """
+}
+
 process COV {
   tag "${meta.id}"
   publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/cov/",
@@ -100,6 +175,7 @@ process COV {
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
   tuple path(fasta), path(fai)
+  tuple path(intervals_dat), path(intervals_bed)
 
   output:
   tuple val(meta),
@@ -108,8 +184,8 @@ process COV {
   tuple val(meta), path("tmpNanoSeq/cov/*"), emit: cov
 
   script:
-  def cov_include = params.cov_include ? "--include ${params.cov_include}" : ""
-  def cov_exclude = params.cov_exclude ? "--exclude ${params.cov_exclude}" : ""
+  def int_include = params.int_include ? "--include ${params.int_include}" : ""
+  def int_exclude = params.int_exclude ? "--exclude ${params.int_exclude}" : ""
   """
   # modules
   module add samtools-1.19/python-3.12.0 
@@ -124,19 +200,19 @@ process COV {
     --normal $normal_bam \
     --ref $fasta \
     cov \
+    --gintervals $intervals_dat \
     -Q ${params.cov_q} \
-    --larger ${params.cov_larger} \
-    ${cov_include} \
-    ${cov_exclude}
+    --larger ${params.int_larger} \
+    ${int_include} \
+    ${int_exclude}
   """
   stub:
   """
   mkdir -p tmpNanoSeq/cov
-  touch tmpNanoSeq/cov/1.done
-  touch tmpNanoSeq/cov/1.cov.bed.gz
-  touch tmpNanoSeq/cov/gIntervals.dat
-  touch tmpNanoSeq/cov/args.json
-  touch tmpNanoSeq/cov/nfiles
+  touch cov/1.done
+  touch cov/1.cov.bed.gz
+  touch cov/args.json
+  touch cov/nfiles
   """
 }
 
@@ -367,7 +443,7 @@ workflow {
     .fromPath(params.samplesheet)
     .splitCsv(header: true)
     | map { row ->
-            def meta = [donor_id: row.donor_id, id: row.id]
+            def meta = [donor_id: row.donor_id, id: row.id, type: "duplex"]
             [meta, file(row.duplex_bam, checkIfExists: true)]
     }
     | set { ch_duplex }
@@ -377,7 +453,7 @@ workflow {
     .fromPath(params.samplesheet)
     .splitCsv(header: true)
     | map { row ->
-            def meta = [donor_id: row.donor_id, id: row.donor_id + "_normal"]
+            def meta = [donor_id: row.donor_id, id: row.donor_id + "_normal", type: "normal"]
             [meta, file(row.normal_bam, checkIfExists: true)]
     }
     | unique
@@ -388,18 +464,33 @@ workflow {
            file(params.fasta + ".fai", checkIfExists: true)]
   post_triNuc = file(params.post_triNuc, checkIfExists: true)
 
-  // index bams
-  samtools_index_duplex(ch_duplex)
-  samtools_index_normal(ch_normal)
+  // index and validate bams
+  SAMTOOLS_INDEX(ch_duplex.concat(ch_normal))
+  VALIDATE_BAMS(SAMTOOLS_INDEX.out, fasta)
+
+  // split indexed channels again
+  ch_bams =
+    SAMTOOLS_INDEX.out
+    .branch { meta, bam, bai ->
+        duplex: meta.type == "duplex"
+        normal: meta.type == "normal"
+    }
+
+  ch_bams.duplex.view { "Duplex BAM indexed: ${it}" }
+  ch_bams.normal.view { "Normal BAM indexed: ${it}" }
+
+  // get chromosome intervals
+  INTERVALS(fasta)
 
   // preprocess duplex
-  PREPROCESS(samtools_index_duplex.out)
+  PREPROCESS(ch_bams.duplex)
 
   // effi
+  PREPROCESS.out.effi.view()
   EFFI(PREPROCESS.out.effi, fasta)
 
   // recombine duplex and normal channels
-  samtools_index_normal.out
+  ch_bams.normal
     .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
     .join(
         PREPROCESS.out.cov.map { meta, bam, bai -> [ meta.donor_id, [meta, bam, bai] ] }
@@ -412,9 +503,8 @@ workflow {
     .set { ch_input }
   
   // run nanoseq
-  COV(ch_input, fasta)
+  COV(ch_input, fasta, INTERVALS.out)
   PART(COV.out.done, fasta)
-  DSA_INTERVALS(PART.out.done, fasta)
   // DSA(PART.out.done, fasta)
   // VAR(DSA.out.done, fasta)
   // INDEL(VAR.out.done, fasta)

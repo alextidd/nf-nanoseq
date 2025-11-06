@@ -1,5 +1,5 @@
 // check bam is not truncated before proceeding + index
-process samtools_index {
+process SAMTOOLS_INDEX {
   tag "${meta.id}"
 
   input:
