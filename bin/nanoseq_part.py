@@ -17,45 +17,44 @@ def main():
     parser_req = parser.add_argument_group('required arguments')
     
     # Arguments
-    parser_opt.add_argument('--out', action='store', default='.',
-                            help='path of the output files and scratch directory (.)')
-    parser_req.add_argument('-R', '--ref', action='store',
-                            required=True, help="reference sequence")
-    
-    # Part specific arguments
     parser_req.add_argument('-n', '--jobs', type=int, action='store',
                             required=True, help='partition dsa,var,indel to this many tasks')
+    parser_req.add_argument('--chrs', type=str, action='store',
+                            required=True, help='comma-separated list of contigs to process')
     parser_opt.add_argument('--excludeBED', action='store',
                             help='BED (gz) file with regions to exclude from analysis.')
     parser_opt.add_argument('--excludeCov', type=int, action='store',
                             help='Exclude regions with coverage values higher than this')
+    parser_req.add_argument('--gintervals', type=str, action='store',
+                            required=True, help='gIntervals.dat file from nanoseq_intervals.py')
     
     args = parser.parse_args()
     
-    # Check files
-    file_chk(args.ref, ".fai", "Reference", sys.exit)
-    
-    tmpDir = args.out + "/tmpNanoSeq"
-    
     print("Starting partitioning\n")
     
-    # Read coverage args
-    with open("%s/cov/args.json" % (tmpDir), "r") as jsonIn:
-        argscov = json.load(jsonIn)
-    
     # Read intervals
-    with open("%s/cov/gIntervals.dat" % (tmpDir), 'rb') as iofile:
+    with open(args.gintervals, "rb") as iofile:
         gintervals = pickle.load(iofile)
     
-    # Read number of coverage files
-    with open("%s/cov/nfiles" % (tmpDir), "r") as iofile:
-        nfiles = int(iofile.read())
+    # Parse chromosome list
+    chr_list = args.chrs.split(',')
+    print(f"Processing {len(chr_list)} chromosomes: {chr_list}\n")
+    
+    # Build expected coverage file names
+    cov_files = []
+    for chr in chr_list:
+        cov_file = f"{chr}.cov.bed.gz"
+        if not os.path.exists(cov_file):
+            sys.exit(f"Error: Coverage file {cov_file} not found")
+        cov_files.append(cov_file)
+    
+    print(f"Found all {len(cov_files)} coverage files\n")
     
     # Read coverage information
     bychr = {}
     bychrAll = {}
-    for iindex in range(1, nfiles + 1):
-        with gzip.open("%s/cov/%s.cov.bed.gz" % (tmpDir, iindex), 'rt') as iofile:
+    for cov_file in cov_files:
+        with gzip.open(cov_file, 'rt') as iofile:
             for iline in iofile:
                 ichr = iline.split('\t')[0]
                 istart = int(iline.split('\t')[1])
@@ -100,6 +99,9 @@ def main():
     totalcov = sum([iint.l for iint in allintervals])
     targetcov = totalcov / args.jobs
     
+    print(f"Total coverage: {totalcov:,} bases")
+    print(f"Target coverage per job: {targetcov:,.0f} bases\n")
+    
     # Partition into jobs
     partitions = []
     currentPartition = []
@@ -117,19 +119,19 @@ def main():
     if currentPartition:
         partitions.append(currentPartition)
     
-    # Write partitions
-    for idx, partition in enumerate(partitions, 1):
-        with open("%s/part/%s.bed" % (tmpDir, idx), 'w') as iofile:
+    # Write partitions to bed file
+    with open("partitions.bed", "w") as iofile:
+        for idx, partition in enumerate(partitions, 1):
             for iint in partition:
-                iofile.write("%s\t%s\t%s\n" % (iint.chr, iint.beg, iint.end))
-    
+                iofile.write("%s\t%s\t%s\t%s\n" % (iint.chr, iint.beg, iint.end, idx))
+
     # Write number of partitions
-    with open("%s/part/nfiles" % (tmpDir), "w") as iofile:
+    with open("nfiles", "w") as iofile:
         iofile.write(str(len(partitions)))
     
-    # Save args
-    with open("%s/part/args.json" % (tmpDir), "w") as jsonOut:
-        json.dump(args.__dict__, jsonOut)
+    # Save partitions as pickle file
+    with open("partitions.dat", "wb") as iofile:
+        pickle.dump(partitions, iofile)
     
     print("Completed partitioning into %s jobs\n" % len(partitions))
 

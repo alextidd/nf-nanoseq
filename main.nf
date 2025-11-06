@@ -110,7 +110,7 @@ process EFFI {
   input:
   tuple val(meta),
         path(bundled_bam), path(bundled_bai),
-        path(filtered_bam), path(filtered_bai)
+        path(dedup_bam), path(dedup_bai)
   tuple path(fasta), path(fai)
 
   output:
@@ -130,7 +130,7 @@ process EFFI {
   efficiency_nanoseq.pl \
     -threads $task.cpus \
     -duplex $bundled_bam \
-    -dedup $filtered_bam \
+    -dedup $dedup_bam \
     -ref $fasta \
     -out efficiency/${meta.id}
   """
@@ -147,7 +147,8 @@ process INTERVALS {
   tuple path(fasta), path(fai)
 
   output:
-  tuple path("gIntervals.dat"), path("intervals.bed")
+  tuple path("gIntervals.dat"), path("intervals.bed"), emit: intervals
+  path "contigs.txt", emit: contigs
 
   script:
   def int_include = params.int_include ? "--include ${params.int_include}" : ""
@@ -157,6 +158,7 @@ process INTERVALS {
   nanoseq_intervals.py \
     --ref $fasta \
     $int_include $int_exclude $int_larger
+  cut -f1 intervals.bed > contigs.txt
   """
   stub:
   """
@@ -166,53 +168,40 @@ process INTERVALS {
 }
 
 process COV {
-  tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/cov/",
-    mode: 'copy', pattern: "tmpNanoSeq/cov/*"
+  tag "${chr}_${meta.id}"
 
   input:
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai)
+        path(normal_bam), path(normal_bai),
+        val(chr)
   tuple path(fasta), path(fai)
-  tuple path(intervals_dat), path(intervals_bed)
 
   output:
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai), emit: done
-  tuple val(meta), path("tmpNanoSeq/cov/*"), emit: cov
+        path(normal_bam), path(normal_bai), emit: dsa
+  tuple val(meta), val(chr), path("${chr}.cov.bed.gz"), emit: part
 
   script:
-  def int_include = params.int_include ? "--include ${params.int_include}" : ""
-  def int_exclude = params.int_exclude ? "--exclude ${params.int_exclude}" : ""
   """
   # modules
-  module add samtools-1.19/python-3.12.0 
-  module load perl-5.30.0 
   module load bcftools-1.19/python-3.11.6
 
-  # run
-  # TODO: handle -k and -j
-  runNanoSeq.py \
-    --threads $task.cpus \
-    --duplex $duplex_bam \
-    --normal $normal_bam \
-    --ref $fasta \
-    cov \
-    --gintervals $intervals_dat \
-    -Q ${params.cov_q} \
-    --larger ${params.int_larger} \
-    ${int_include} \
-    ${int_exclude}
+  # get coverage per window
+  bamcov \\
+    --min-MQ ${params.cov_q} \\
+    --region ${chr} \\
+    --win ${params.cov_window} \\
+    --output ${chr}.cov.bed \\
+    $duplex_bam
+
+  # bgzip output
+  bgzip --compress-level 2 --force ${chr}.cov.bed
   """
   stub:
   """
-  mkdir -p tmpNanoSeq/cov
-  touch cov/1.done
-  touch cov/1.cov.bed.gz
-  touch cov/args.json
-  touch cov/nfiles
+  touch ${chr}.cov.bed.gz
   """
 }
 
@@ -222,44 +211,27 @@ process PART {
     mode: 'copy', pattern: "tmpNanoSeq/part/*"
 
   input:
-  tuple val(meta),
-        path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai)
-  tuple path(fasta), path(fai)
+  tuple val(meta), val(chrs), path(cov_beds),
+        path(gintervals), path(intervals_bed)
 
   output:
-  tuple val(meta),
-        path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai), emit: done
-  tuple path(fasta), path(fai)
-  tuple val(meta), path("tmpNanoSeq/part/*"), emit: part
+  tuple val(meta), path("partitions.bed"), path("partitions.dat")
 
   script:
   def excludeBED = params.part_excludeBED ? "--excludeBED ${params.part_excludeBED}" : ""
   """
-  # modules
-  module add samtools-1.19/python-3.12.0 
-  module load perl-5.30.0 
-  module load bcftools-1.19/python-3.11.6
-
   # run
-  # TODO: handle -n 100
-  runNanoSeq.py \
-    --threads $task.cpus  \
-    --normal $normal_bam \
-    --duplex $duplex_bam \
-    --ref $fasta \
-    part \
-    --jobs ${params.jobs} \
-    --excludeCov ${params.part_excludeCov} \
+  nanoseq_part.py \\
+    --jobs ${params.jobs} \\
+    --excludeCov ${params.part_excludeCov} \\
+    --chrs ${chrs.join(',')} \\
+    --gintervals $gintervals \\
     ${excludeBED}
   """
   stub:
   """
-  mkdir -p tmpNanoSeq/part
-  touch tmpNanoSeq/part/1.done
-  touch tmpNanoSeq/part/intervalsPerCPU.dat
-  touch tmpNanoSeq/part/args.json
+  touch partitions.bed
+  touch partitions.dat
   """
 }
 
@@ -487,14 +459,18 @@ workflow {
     }
   CHECK_CONTIGS(ch_check, fasta)
 
-  // get chromosome intervals
+  // get contig intervals
   INTERVALS(fasta)
+
+  // create channel of contigs
+  ch_contigs =
+    INTERVALS.out.contigs
+    .splitCsv()
 
   // preprocess duplex
   PREPROCESS(ch_bams.duplex)
 
   // effi
-  PREPROCESS.out.effi.view()
   EFFI(PREPROCESS.out.effi, fasta)
 
   // rejoin duplex and normal channels by donor id
@@ -504,16 +480,26 @@ workflow {
     .join(
         PREPROCESS.out.cov.map { meta, bam, bai -> [ meta.donor_id, [meta, bam, bai] ] }
     )
-    .map { donor_id, normal, duplex ->
-        def (normal_meta, normal_bam, normal_bai) = normal
+    .map { _donor_id, normal, duplex ->
+        def (_normal_meta, normal_bam, normal_bai) = normal
         def (duplex_meta, duplex_bam, duplex_bai) = duplex
         tuple(duplex_meta, duplex_bam, duplex_bai, normal_bam, normal_bai)
     }
+  ch_input_per_chr = ch_input.combine(ch_contigs)
   
-  // run nanoseq analysis
-  COV(ch_input, fasta, INTERVALS.out)
-  PART(COV.out.done, fasta)
-  // DSA(PART.out.done, fasta)
+  // get coverage per 100bp bin per chromosome
+  COV(ch_input_per_chr, fasta)
+
+  // partition all chromosomes
+  ch_partition =
+    COV.out.part
+    .groupTuple(size: 27)
+    .combine(INTERVALS.out.intervals)
+  PART(ch_partition)
+
+  // run dsa per partition
+  // ch_input.combine(PART.out)
+  // DSA(COV.out.dsa, fasta)
   // VAR(DSA.out.done, fasta)
   // INDEL(VAR.out.done, fasta)
   // POST(INDEL.out.done, fasta, post_triNuc)
