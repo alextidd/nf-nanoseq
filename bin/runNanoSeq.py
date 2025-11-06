@@ -1136,7 +1136,7 @@ if (args.subcommand == 'post'):
                                   'dplxCQrevC,dplxCQrevG,dplxCQrevT,bulkForwardTotal,bulkReverseTotal,'
                                   'dplxfwdTotal,dplxrevTotal,left,right,qpos,mismatch,ismasked,dplxBarcode\n')
 
-        # wirte body
+        # write body
         for i in range(nfiles):
             # Write variants
             ifile = "%s/var/%s.var" % (tmpDir, i+1)

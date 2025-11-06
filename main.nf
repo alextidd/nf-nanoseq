@@ -234,7 +234,7 @@ process PART {
 }
 
 process DSA {
-  tag "${meta.id}"
+  tag "${part_i}_${meta.id}"
 
   input:
   tuple val(meta),
@@ -245,21 +245,24 @@ process DSA {
   tuple path(dsa_noise_bed), path(dsa_noise_tbi)
 
   output:
-  tuple val(meta),
+  tuple val(meta), val(part_i),
+        path("dsa_${part_i}.bed.gz"), path("dsa_${part_i}.bed.gz.tbi"),
         path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai), emit: done
-  tuple val(meta),
+        path(normal_bam), path(normal_bai),
+        emit: indel
+  tuple val(meta), val(part_i),
         path("part_${part_i}.bed.gz"), path("dsa_${part_i}.bed.gz.tbi"),
-        emit: dsa
+        emit: var
 
   script:
+  // TODO: change `> dsa.bed` to `> dsa_${part_i}.bed`
   """
   # modules
   module add samtools-1.19/python-3.12.0 
   module load bcftools-1.19/python-3.11.6
 
   # run dsa per partition segment
-  > dsa.bed
+  > dsa_${part_i}.bed
   cat $part_bed |
   while read -r chr start end ; do
     dsa \\
@@ -276,7 +279,8 @@ process DSA {
   done
 
   # check number of fields for truncation - should be 45
-  awk 'END{ if (NF != 45) print "Truncated dsa output file for partition $part_i !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' dsa.bed
+  awk 'END{ if (NF != 45) print "Truncated dsa output file for partition $part_i !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' \
+    dsa_${part_i}.bed
 
   # bgzip and index
   bgzip -f -l 2 dsa_${part_i}.bed
@@ -291,92 +295,123 @@ process DSA {
 }
 
 process VAR {
-  tag "${meta.id}"
+  tag "${part_i}_${meta.id}"
 
   input:
-  tuple val(meta),
-        path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai)
-  tuple path(fasta), path(fai)
+  tuple val(meta), val(part_i), path(dsa_bed), path(dsa_tbi)
 
   output:
-  tuple val(meta),
-        path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai), emit: done
-  tuple val(meta), path("tmpNanoSeq/var/*"), emit: var
+  tuple val(meta), val(part_i), path("var_${part_i}.tsv"), emit: merge_vars
 
   script:
   """
-  # modules
-  module add samtools-1.19/python-3.12.0 
-  module load perl-5.30.0 
-  module load bcftools-1.19/python-3.11.6
+  # run variantcaller
+  variantcaller \\
+    -B $dsa_bed \\
+    -U var_cov_${part_i}.bed \\
+    -O var_${part_i}.tsv \\
+    -D var_discarded_${part_i}.tsv \\
+    -a ${params.var_a} \\
+    -b ${params.var_b} \\
+    -c ${params.var_c} \\
+    -d ${params.var_d} \\
+    -f ${params.var_f} \\
+    -i ${params.var_i} \\
+    -m ${params.var_m} \\
+    -n ${params.var_n} \\
+    -p ${params.var_p} \\
+    -q ${params.var_q} \\
+    -r ${params.var_r} \\
+    -v ${params.var_v} \\
+    -x ${params.var_x} \\
+    -z ${params.var_z}
+  """
+  stub:
+  """
+  touch var_${part_i}.tsv
+  touch var_discarded_${part_i}.tsv
+  touch var_cov_${part_i}.bed
+  """
+}
 
-  # run
-  # TODO: handle -k $LSB_JOBINDEX_END and -j $LSB_JOBINDEX
-  runNanoSeq.py \
-    --duplex $duplex_bam \
-    --normal $normal_bam \
-    --ref $fasta \
-    var \
-    --max_index ${params.jobs} \
-    -a $params.var_a \
-    -b $params.var_b \
-    -c $params.var_c \
-    -d $params.var_d \
-    -f $params.var_f \
-    -i $params.var_i \
-    -m $params.var_m \
-    -n $params.var_n \
-    -p $params.var_p \
-    -q $params.var_q \
-    -r $params.var_r \
-    -v $params.var_v \
-    -x $params.var_x \
-    -z $params.var_z
+process MERGE_VARS {
+  tag "${meta.id}"
+
+  input:
+  tuple val(meta), val(partitions), path(var_tsvs)
+
+  output:
+  tuple val(meta),
+        path("coverage.csv"), path("callvsqpos.csv"), path("pyrvsmask.csv"),
+        path("readbundles.csv"), path("burdens.csv"), path("variants.csv"),
+        path("discardedvariants.csv"), path("mismatches.csv")
+
+  script:
+  """
+  nanoseq_merge_vars.py \\
+    --partitions ${partitions.join(',')}
   """
 }
 
 process INDEL {
-  tag "${meta.id}"
+  tag "${part_i}_${meta.id}"
 
   input:
-  tuple val(meta),
+  tuple val(meta), val(part_i),
+        path(dsa_bed), path(dsa_tbi),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
   tuple path(fasta), path(fai)
 
   output:
   tuple val(meta),
-        path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai), emit: done
-  tuple val(meta), path("tmpNanoSeq/indel/*"), emit: indel
+        path("indel_${part_i}.bed.gz"),
+        path("indel_${part_i}.vcf.gz"),
+        path("indel_${part_i}.filtered.vcf.gz"),
+        path("indel_${part_i}.filtered.vcf.gz.tbi"),
+        emit: merge_indels
 
   script:
   """
-  # modules
-  module add samtools-1.19/python-3.12.0 
-  module load perl-5.30.0 
-  module load bcftools-1.19/python-3.11.6
+  # step 1
+  indelCaller_step1.pl \\
+    -out indel_${part_i}.bed.gz \\
+    -reads-bundle ${params.indel_rb} \\
+    -trim3 ${params.indel_t3} \\
+    -trim5 ${params.indel_t5} \\
+    -min-coverage ${params.indel_z} \\
+    -max-vaf ${params.indel_v} \\
+    -min-as-xs ${params.indel_a} \\
+    -max-clip ${params.indel_c} \\
+    $dsa_bed
 
-  # run
-  # TODO: handle -k $LSB_JOBINDEX_END and -j $LSB_JOBINDEX
-  runNanoSeq.py \
-    --threads $task.cpus  \
-    --normal $normal_bam \
-    --duplex $duplex_bam \
-    --ref $fasta \
-    indel \
-    --sample ${meta.id} \
-    --rb ${params.indel_rb} \
-    --t3 ${params.indel_t3} \
-    --t5 ${params.indel_t5} \
-    -z ${params.indel_z} \
-    -v ${params.indel_v}
-    -a ${params.indel_a} \
-    -c ${params.indel_c}
+  # step 2
+  indelCaller_step2.pl \\
+    -sort \\
+    -out indel_${part_i} \\
+    -ref $fasta \\
+    -bam $duplex_bam \\
+    indel_${part_i}.bed.gz
+
+  # step 3
+  indelCaller_step3.R \\
+    $fasta \\
+    indel_${part_i}.vcf.gz \\
+    $normal_bam \\
+    ${params.indel_v}
+  """
+  stub:
+  """
+  touch indel_${part_i}.bed.gz
+  touch indel_${part_i}.vcf.gz
+  touch indel_${part_i}.filtered.vcf.gz
+  touch indel_${part_i}.filtered.vcf.gz.tbi
   """
 }
+
+// process MERGE_INDELS
+// process MERGE_VAR_COV
+// process SUMMARY
 
 process POST {
   tag "${meta.id}"
@@ -501,6 +536,7 @@ workflow {
   COV(ch_input_per_chr, fasta)
 
   // partition the genome into even chunks by coverage
+  // TODO: fix size to use number of contigs
   ch_partition =
     COV.out.part
     .groupTuple(size: 27)
@@ -517,8 +553,13 @@ workflow {
       tuple(meta, partition_num, part_bed)
     }
   DSA(ch_input.combine(ch_partitions, by: 0), fasta, dsa_noise_bed)
-  // VAR(DSA.out.done, fasta)
-  // INDEL(VAR.out.done, fasta)
+
+  // run variantcaller per partition, merge outputs
+  VAR(DSA.out.var)
+  MERGE_VARS(VAR.out.merge_vars.groupTuple(size: params.jobs))
+
+  // run indelcaller per partition, merge outputs
+  INDEL(DSA.out.indel, fasta)
   // POST(INDEL.out.done, fasta, post_triNuc)
 
 }
