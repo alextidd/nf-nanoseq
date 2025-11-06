@@ -4,9 +4,10 @@ import sys
 import os
 import json
 import pickle
-import gzip
 import argparse
-from nanoseq_utils import file_chk
+import math
+import gzip
+import copy
 from nanoseq_ginterval import GInterval
 
 def main():
@@ -16,124 +17,203 @@ def main():
     parser_opt = parser.add_argument_group('optional arguments')
     parser_req = parser.add_argument_group('required arguments')
     
-    # Arguments
+    # Required arguments
     parser_req.add_argument('-n', '--jobs', type=int, action='store',
                             required=True, help='partition dsa,var,indel to this many tasks')
     parser_req.add_argument('--chrs', type=str, action='store',
                             required=True, help='comma-separated list of contigs to process')
+    parser_req.add_argument('--gintervals', type=str, action='store',
+                            required=True, help='gIntervals.dat file from nanoseq_intervals.py')
+    
+    # Optional arguments
     parser_opt.add_argument('--excludeBED', action='store',
                             help='BED (gz) file with regions to exclude from analysis.')
     parser_opt.add_argument('--excludeCov', type=int, action='store',
                             help='Exclude regions with coverage values higher than this')
-    parser_req.add_argument('--gintervals', type=str, action='store',
-                            required=True, help='gIntervals.dat file from nanoseq_intervals.py')
+    parser_opt.add_argument('--win', type=int, action='store',
+                            default=100, help='bin size used for coverage calculation (100)')
     
     args = parser.parse_args()
     
     print("Starting partitioning\n")
     
-    # Read intervals
+    # Load genomic intervals
     with open(args.gintervals, "rb") as iofile:
-        gintervals = pickle.load(iofile)
+        gIntervals = pickle.load(iofile)
     
     # Parse chromosome list
     chr_list = args.chrs.split(',')
     print(f"Processing {len(chr_list)} chromosomes: {chr_list}\n")
     
-    # Build expected coverage file names
-    cov_files = []
-    for chr in chr_list:
-        cov_file = f"{chr}.cov.bed.gz"
+    # Read coverage information from chromosome-named files
+    coverage = []
+    cctotal = 0
+    chrOffset = {}
+    tmpIntervals = []
+    
+    print("Parsing coverage files\n")
+    for chr_name in chr_list:
+        cov_file = f"cov_{chr_name}.bed.gz"
         if not os.path.exists(cov_file):
             sys.exit(f"Error: Coverage file {cov_file} not found")
-        cov_files.append(cov_file)
-    
-    print(f"Found all {len(cov_files)} coverage files\n")
-    
-    # Read coverage information
-    bychr = {}
-    bychrAll = {}
-    for cov_file in cov_files:
+        
         with gzip.open(cov_file, 'rt') as iofile:
             for iline in iofile:
-                ichr = iline.split('\t')[0]
-                istart = int(iline.split('\t')[1])
-                iend = int(iline.split('\t')[2])
-                icov = int(iline.split('\t')[3])
-                if ichr not in bychrAll:
-                    bychrAll[ichr] = []
-                bychrAll[ichr].append(GInterval(ichr, istart, iend))
+                ichr = str(iline.split('\t')[0])
+                ib = int(iline.split('\t')[1])
+                ie = int(iline.split('\t')[2])
+                cc = int(iline.split('\t')[3])
+                cctotal += cc
                 
-                if args.excludeCov is not None and icov > args.excludeCov:
-                    continue
+                if args.excludeCov is not None:
+                    if cc >= args.excludeCov:
+                        tmpIntervals.append(GInterval(ichr, ib+1, ie))
                 
-                if ichr not in bychr:
-                    bychr[ichr] = []
-                bychr[ichr].append(GInterval(ichr, istart, iend))
+                if ib == 0:
+                    chrOffset[str(ichr)] = len(coverage)
+                coverage.append([ib, cc])
     
-    # Read excluded regions if provided
+    print("Completed parsing coverage files\n")
+    
+    # Remove regions to exclude from BED file
     if args.excludeBED is not None:
-        file_chk(args.excludeBED, ".tbi", "excludeBED", sys.exit)
+        if not os.path.isfile(args.excludeBED):
+            sys.exit(f"excludeBED file {args.excludeBED} not found!")
+        if not os.path.isfile(args.excludeBED + ".tbi"):
+            sys.exit(f"excludeBED index file {args.excludeBED}.tbi not found!")
+        
         with gzip.open(args.excludeBED, 'rt') as iofile:
             for iline in iofile:
                 if iline.startswith('#'):
                     continue
-                ichr = iline.split('\t')[0]
-                istart = int(iline.split('\t')[1])
-                iend = int(iline.split('\t')[2])
-                if ichr not in bychr:
+                ichr = str(iline.split('\t')[0])
+                ib = int(iline.split('\t')[1])
+                ie = int(iline.split('\t')[2])
+                tmpIntervals.append(GInterval(ichr, ib+1, ie))
+        tmpIntervals.sort()
+    
+    if len(tmpIntervals) > 0:
+        # Merge overlapping intervals
+        xIntervals = [tmpIntervals.pop(0)]
+        while len(tmpIntervals) > 0:
+            xIntervals.extend(xIntervals.pop() + tmpIntervals.pop(0))
+        
+        print(f"Excluding {len(xIntervals)} intervals\n")
+        
+        # Remove the excluded intervals
+        iiresult = []
+        for ii in gIntervals:
+            ifrag = ii
+            for jj in xIntervals:
+                if ifrag.chr != jj.chr:
                     continue
-                
-                newintervals = []
-                for iint in bychr[ichr]:
-                    newintervals.extend(iint - GInterval(ichr, istart, iend))
-                bychr[ichr] = newintervals
+                diff = ifrag - jj
+                if len(diff) == 2:
+                    iiresult.append(diff[0])
+                    ifrag = diff[1]
+                elif len(diff) == 1:
+                    ifrag = diff[0]
+                else:
+                    break
+            else:
+                iiresult.append(ifrag)
+        gIntervals = iiresult
+        
+        # Recalculate total coverage after exclusions
+        xSumCov = 0
+        for iinterval in gIntervals:
+            ichar = iinterval.chr
+            ibeg = iinterval.beg - 1
+            iend = iinterval.end - 1
+            for i in range(math.floor(ibeg/args.win), math.floor(iend/args.win) + 1):
+                if not ichar in chrOffset:
+                    break
+                j = i + chrOffset[ichar]
+                xSumCov += coverage[j][1]
+        cctotal = xSumCov
     
-    # Combine intervals
-    allintervals = []
-    for ichr in bychr:
-        allintervals.extend(bychr[ichr])
-    allintervals.sort()
+    # Determine genomic intervals for each job
+    # Partition so each job has roughly the same amount of coverage
+    basesPerCPU = 0
+    njobs = args.jobs
+    basesPerCPU = cctotal / njobs
     
-    # Calculate total coverage
-    totalcov = sum([iint.l for iint in allintervals])
-    targetcov = totalcov / args.jobs
+    print(f"Partitioning {njobs} jobs with {basesPerCPU:.0f} bases/task\n")
     
-    print(f"Total coverage: {totalcov:,} bases")
-    print(f"Target coverage per job: {targetcov:,.0f} bases\n")
+    sumCov = 0
+    oIntervals = []
+    intervalsPerCPU = []
+    gIntervalsCopy = copy.deepcopy(gIntervals)
     
-    # Partition into jobs
-    partitions = []
-    currentPartition = []
-    currentCov = 0
+    while len(gIntervals) > 0:
+        iinterval = gIntervals.pop(0)
+        ichar = iinterval.chr
+        ibeg = iinterval.beg - 1
+        iend = iinterval.end - 1
+        
+        for i in range(math.floor(ibeg/args.win), math.floor(iend/args.win) + 1):
+            j = i + chrOffset[ichar]
+            sumCov += coverage[j][1]
+            
+            if sumCov > basesPerCPU:
+                jend = min([coverage[j][0] + args.win, iend])
+                oIntervals.append(GInterval(ichar, ibeg + 1, jend + 1))
+                intervalsPerCPU.append(oIntervals)
+                oIntervals = []
+                sumCov = 0
+                ibeg = jend + 1
+        
+        if iend >= ibeg:
+            oIntervals.append(GInterval(ichar, ibeg + 1, iend + 1))
     
-    for iint in allintervals:
-        if currentCov + iint.l <= targetcov or len(currentPartition) == 0:
-            currentPartition.append(iint)
-            currentCov += iint.l
-        else:
-            partitions.append(currentPartition)
-            currentPartition = [iint]
-            currentCov = iint.l
+    if len(oIntervals) > 0:
+        intervalsPerCPU.append(oIntervals)
     
-    if currentPartition:
-        partitions.append(currentPartition)
+    while len(intervalsPerCPU) < njobs:
+        intervalsPerCPU.append([])
     
-    # Write partitions to bed file
-    with open("partitions.bed", "w") as iofile:
-        for idx, partition in enumerate(partitions, 1):
+    # Verify partitioning is correct
+    print("Checking partition of intervals..", end='')
+    flatInt = [item for sublist in intervalsPerCPU[0:njobs] for item in sublist]
+    nbases1 = sum(i.l for i in flatInt)
+    nbases2 = sum(i.l for i in gIntervalsCopy)
+    
+    if nbases1 != nbases2:
+        sys.exit(f"Internal check failed: interval length after partition doesn't match original ({nbases2}, {nbases1})\n")
+    
+    print("..", end='')
+    mIntervals = [flatInt.pop(0)]
+    while len(flatInt) > 0:
+        mIntervals.extend(mIntervals.pop() + flatInt.pop(0))
+    
+    for (i, ival) in enumerate(gIntervalsCopy):
+        if not (ival == mIntervals[i]):
+            sys.exit(f"Internal check failed: mismatch after part (interval {mIntervals[i]} should be {ival})\n")
+    
+    print(" OK\n")
+    
+    # Write partitions as separate BED files
+    for idx, partition in enumerate(intervalsPerCPU, 1):
+        with open(f"part_{idx}.bed", "w") as iofile:
             for iint in partition:
-                iofile.write("%s\t%s\t%s\t%s\n" % (iint.chr, iint.beg, iint.end, idx))
-
+                iofile.write(f"{iint.chr}\t{iint.beg}\t{iint.end}\n")
+    
     # Write number of partitions
     with open("nfiles", "w") as iofile:
-        iofile.write(str(len(partitions)))
+        iofile.write(str(len(intervalsPerCPU)))
     
-    # Save partitions as pickle file
-    with open("partitions.dat", "wb") as iofile:
-        pickle.dump(partitions, iofile)
+    print(f"Completed partitioning into {len(intervalsPerCPU)} jobs\n")
     
-    print("Completed partitioning into %s jobs\n" % len(partitions))
+    # Print partition summary
+    print("Partition summary:")
+    for idx, partition in enumerate(intervalsPerCPU, 1):
+        total_bases = sum(iint.l for iint in partition)
+        n_intervals = len(partition)
+        if n_intervals > 0:
+            chrs = set(iint.chr for iint in partition)
+            print(f"  Partition {idx:3d}: {n_intervals:5d} intervals | {total_bases:12,} bases | chrs: {','.join(sorted(chrs))}")
+        else:
+            print(f"  Partition {idx:3d}: empty")
 
 if __name__ == '__main__':
     main()

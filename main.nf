@@ -62,7 +62,6 @@ process CHECK_CONTIGS {
 
 process PREPROCESS {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/", mode: 'copy'
 
   input:
   tuple val(meta), path(duplex_bam), path(duplex_bai)
@@ -105,7 +104,6 @@ process PREPROCESS {
 
 process EFFI {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/", mode: 'copy'
 
   input:
   tuple val(meta),
@@ -181,7 +179,7 @@ process COV {
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai), emit: dsa
-  tuple val(meta), val(chr), path("${chr}.cov.bed.gz"), emit: part
+  tuple val(meta), val(chr), path("cov_${chr}.bed.gz"), emit: part
 
   script:
   """
@@ -193,34 +191,33 @@ process COV {
     --min-MQ ${params.cov_q} \\
     --region ${chr} \\
     --win ${params.cov_window} \\
-    --output ${chr}.cov.bed \\
+    --output cov_${chr}.bed \\
     $duplex_bam
 
   # bgzip output
-  bgzip --compress-level 2 --force ${chr}.cov.bed
+  bgzip --compress-level 2 --force cov_${chr}.bed
   """
   stub:
   """
-  touch ${chr}.cov.bed.gz
+  touch cov_${chr}.bed.gz
   """
 }
 
 process PART {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/part/",
-    mode: 'copy', pattern: "tmpNanoSeq/part/*"
 
   input:
   tuple val(meta), val(chrs), path(cov_beds),
         path(gintervals), path(intervals_bed)
 
   output:
-  tuple val(meta), path("partitions.bed"), path("partitions.dat")
+  tuple val(meta), path("part_*.bed", arity: params.jobs)
 
   script:
   def excludeBED = params.part_excludeBED ? "--excludeBED ${params.part_excludeBED}" : ""
   """
-  # run
+  # TODO: move excludeCov and excludeBED functionalities of nanoseq_part.py to command line
+  # excludeCov is RENanoSeq-specific
   nanoseq_part.py \\
     --jobs ${params.jobs} \\
     --excludeCov ${params.part_excludeCov} \\
@@ -230,60 +227,71 @@ process PART {
   """
   stub:
   """
-  touch partitions.bed
-  touch partitions.dat
+  for i in \$(seq 1 ${params.jobs}); do
+    touch part_\${i}.bed
+  done
   """
 }
 
 process DSA {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/dsa/",
-    mode: 'copy', pattern: "tmpNanoSeq/dsa/*"
 
   input:
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai)
+        path(normal_bam), path(normal_bai),
+        val(part_i), path(part_bed)
   tuple path(fasta), path(fai)
+  tuple path(dsa_noise_bed), path(dsa_noise_tbi)
 
   output:
   tuple val(meta),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai), emit: done
-  tuple val(meta), path("tmpNanoSeq/dsa/*"), emit: dsa
+  tuple val(meta),
+        path("part_${part_i}.bed.gz"), path("dsa_${part_i}.bed.gz.tbi"),
+        emit: dsa
 
   script:
   """
   # modules
   module add samtools-1.19/python-3.12.0 
-  module load perl-5.30.0 
   module load bcftools-1.19/python-3.11.6
 
-  # run
-  runNanoSeq.py \
-    --threads $task.cpus  \
-    --normal $normal_bam \
-    --duplex $duplex_bam \
-    --ref $fasta \
-    dsa \
-    --max_index ${params.jobs} \
-    --mask ${params.dsa_noise_bed} \
-    -d ${params.dsa_d} \
-    -q ${params.dsa_q} \
-    -M ${params.dsa_M} \
-    --no_test
+  # run dsa per partition segment
+  > dsa.bed
+  cat $part_bed |
+  while read -r chr start end ; do
+    dsa \\
+      -A $normal_bam \\
+      -B $duplex_bam \\
+      -D $dsa_noise_bed \\
+      -R $fasta \\
+      -d ${params.dsa_d} \\
+      -Q ${params.dsa_q} \\
+      -M ${params.dsa_M} \\
+      -t \\
+      -r "\$chr" -b \$start -e \$end \\
+      >> dsa_${part_i}.bed ;
+  done
+
+  # check number of fields for truncation - should be 45
+  awk 'END{ if (NF != 45) print "Truncated dsa output file for partition $part_i !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' dsa.bed
+
+  # bgzip and index
+  bgzip -f -l 2 dsa_${part_i}.bed
+  sleep 2
+  bgzip -t dsa_${part_i}.bed.gz
   """
   stub:
   """
-  mkdir -p tmpNanoSeq/dsa
-
+  touch dsa_${part_i}.bed.gz
+  touch dsa_${part_i}.bed.gz.tbi
   """
 }
 
 process VAR {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/var/",
-    mode: 'copy', pattern: "tmpNanoSeq/var/*"
 
   input:
   tuple val(meta),
@@ -331,8 +339,6 @@ process VAR {
 
 process INDEL {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/indel/",
-    mode: 'copy', pattern: "tmpNanoSeq/indel/*"
 
   input:
   tuple val(meta),
@@ -374,8 +380,6 @@ process INDEL {
 
 process POST {
   tag "${meta.id}"
-  publishDir "${params.out_dir}/${meta.donor_id}/analysis/${meta.id}/post/",
-    mode: 'copy', pattern: "tmpNanoSeq/post/*"
 
   input:
   tuple val(meta),
@@ -410,6 +414,8 @@ process POST {
 
 workflow {
 
+  // TODO: keep id with normal_bam (can have different matched normals for the same donor)
+
   // get duplex bams
   ch_duplex =
     channel.fromPath(params.samplesheet)
@@ -433,6 +439,8 @@ workflow {
   fasta = [file(params.fasta, checkIfExists: true),
            file(params.fasta + ".fai", checkIfExists: true)]
   post_triNuc = file(params.post_triNuc, checkIfExists: true)
+  dsa_noise_bed = [file(params.dsa_noise_bed, checkIfExists: true),
+                   file(params.dsa_noise_bed + ".tbi", checkIfExists: true)]
 
   // index bams
   SAMTOOLS_INDEX(ch_duplex.concat(ch_normal))
@@ -446,6 +454,7 @@ workflow {
     }
 
   // check that bam and ref contigs match
+  // TODO: keep meta.id with the donor, use in join
   ch_check =
     ch_bams.normal
     .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
@@ -474,6 +483,7 @@ workflow {
   EFFI(PREPROCESS.out.effi, fasta)
 
   // rejoin duplex and normal channels by donor id
+  // TODO: join by id
   ch_input =
     ch_bams.normal
     .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
@@ -490,7 +500,7 @@ workflow {
   // get coverage per 100bp bin per chromosome
   COV(ch_input_per_chr, fasta)
 
-  // partition all chromosomes
+  // partition the genome into even chunks by coverage
   ch_partition =
     COV.out.part
     .groupTuple(size: 27)
@@ -498,8 +508,15 @@ workflow {
   PART(ch_partition)
 
   // run dsa per partition
-  // ch_input.combine(PART.out)
-  // DSA(COV.out.dsa, fasta)
+  ch_partitions =
+    PART.out
+    .transpose()
+    .map { meta, part_bed ->
+      // extract partition number from filename (e.g., "part_1.bed" -> 1)
+      def partition_num = part_bed.name.replaceAll(/part_(\d+)\.bed/, '$1').toInteger()
+      tuple(meta, partition_num, part_bed)
+    }
+  DSA(ch_input.combine(ch_partitions, by: 0), fasta, dsa_noise_bed)
   // VAR(DSA.out.done, fasta)
   // INDEL(VAR.out.done, fasta)
   // POST(INDEL.out.done, fasta, post_triNuc)
