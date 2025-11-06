@@ -8,7 +8,7 @@ nextflow.enable.dsl=2
 // import modules
 include { SAMTOOLS_INDEX } from './modules/local/SAMTOOLS_INDEX'
 
-process VALIDATE_BAMS {
+process CHECK_CONTIGS {
   tag "${meta.id}"
 
   input:
@@ -439,34 +439,31 @@ process POST {
 workflow {
 
   // get duplex bams
-  Channel
-    .fromPath(params.samplesheet)
+  ch_duplex =
+    channel.fromPath(params.samplesheet)
     .splitCsv(header: true)
-    | map { row ->
+    .map { row ->
             def meta = [donor_id: row.donor_id, id: row.id, type: "duplex"]
             [meta, file(row.duplex_bam, checkIfExists: true)]
     }
-    | set { ch_duplex }
 
   // get normal bams
-  Channel
-    .fromPath(params.samplesheet)
+  ch_normal =
+    channel.fromPath(params.samplesheet)
     .splitCsv(header: true)
-    | map { row ->
+    .map { row ->
             def meta = [donor_id: row.donor_id, id: row.donor_id + "_normal", type: "normal"]
             [meta, file(row.normal_bam, checkIfExists: true)]
     }
-    | unique
-    | set { ch_normal }
+    .unique()
 
   // get reference files
   fasta = [file(params.fasta, checkIfExists: true),
            file(params.fasta + ".fai", checkIfExists: true)]
   post_triNuc = file(params.post_triNuc, checkIfExists: true)
 
-  // index and validate bams
+  // index bams
   SAMTOOLS_INDEX(ch_duplex.concat(ch_normal))
-  VALIDATE_BAMS(SAMTOOLS_INDEX.out, fasta)
 
   // split indexed channels again
   ch_bams =
@@ -476,8 +473,19 @@ workflow {
         normal: meta.type == "normal"
     }
 
-  ch_bams.duplex.view { "Duplex BAM indexed: ${it}" }
-  ch_bams.normal.view { "Normal BAM indexed: ${it}" }
+  // check that bam and ref contigs match
+  ch_check =
+    ch_bams.normal
+    .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
+    .join(
+        ch_bams.duplex.map { meta, bam, bai -> [ meta.donor_id, [meta, bam, bai] ] }
+    )
+    .map { donor_id, normal, duplex ->
+        def (normal_meta, normal_bam, normal_bai) = normal
+        def (duplex_meta, duplex_bam, duplex_bai) = duplex
+        tuple(duplex_meta, duplex_bam, duplex_bai, normal_bam, normal_bai)
+    }
+  CHECK_CONTIGS(ch_check, fasta)
 
   // get chromosome intervals
   INTERVALS(fasta)
@@ -489,8 +497,9 @@ workflow {
   PREPROCESS.out.effi.view()
   EFFI(PREPROCESS.out.effi, fasta)
 
-  // recombine duplex and normal channels
-  ch_bams.normal
+  // rejoin duplex and normal channels by donor id
+  ch_input =
+    ch_bams.normal
     .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
     .join(
         PREPROCESS.out.cov.map { meta, bam, bai -> [ meta.donor_id, [meta, bam, bai] ] }
@@ -500,9 +509,8 @@ workflow {
         def (duplex_meta, duplex_bam, duplex_bai) = duplex
         tuple(duplex_meta, duplex_bam, duplex_bai, normal_bam, normal_bai)
     }
-    .set { ch_input }
   
-  // run nanoseq
+  // run nanoseq analysis
   COV(ch_input, fasta, INTERVALS.out)
   PART(COV.out.done, fasta)
   // DSA(PART.out.done, fasta)
