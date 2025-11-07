@@ -116,4 +116,4 @@ metrics <- data.frame("Metric" = c("total variants", "unique variants", "referen
               format((n_variants + n_reference), scientific = FALSE),
               (n_variants / (n_variants + n_reference)), coverage))
 
-print(metrics)
+write.table(metrics, file = "summary.txt", sep = "\t", row.names = FALSE, quote = FALSE)

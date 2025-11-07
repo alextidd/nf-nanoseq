@@ -364,16 +364,16 @@ process VAR {
 
 process VAR_MERGE_CSV {
   tag "${meta.id}"
+  publishDir "${params.out_dir}/${meta.donor_id}/${meta.id}", mode: 'copy', overwrite: true
 
   input:
   tuple val(meta), val(partitions), path(var_tsvs)
 
   output:
-  tuple val(meta),
-        path("coverage.csv"), path("callvsqpos.csv"), path("pyrvsmask.csv"),
-        path("readbundles.csv"), path("burdens.csv"), path("variants.csv"),
-        path("discardedvariants.csv"), path("mismatches.csv"), emit: summary
   tuple val(meta), path("variants.csv"), emit: var_vcf
+  tuple val(meta), path("*.csv"), emit: plot
+  tuple val(meta), path("*.csv"), emit: summary
+
 
   script:
   """
@@ -384,6 +384,7 @@ process VAR_MERGE_CSV {
 
 process VAR_VCF {
   tag "${meta.id}"
+  publishDir "${params.out_dir}/${meta.donor_id}/${meta.id}", mode: 'copy', overwrite: true
 
   input:
   tuple val(meta), path(vars_csv)
@@ -404,6 +405,7 @@ process VAR_VCF {
 
 process VAR_MERGE_COV {
   tag "${meta.id}"
+  publishDir "${params.out_dir}/${meta.donor_id}/${meta.id}", mode: 'copy', overwrite: true
 
   input:
   tuple val(meta), val(partitions), path(vars_covs)
@@ -493,6 +495,7 @@ process INDEL {
 
 process INDEL_MERGE {
   tag "${meta.id}"
+  publishDir "${params.out_dir}/${meta.donor_id}/${meta.id}", mode: 'copy', overwrite: true
 
   input:
   tuple val(meta), val(partitions),
@@ -536,20 +539,44 @@ process INDEL_MERGE {
   """
 }
 
-process SUMMARY {
+process PLOT {
   tag "${meta.id}"
+  publishDir "${params.out_dir}/${meta.donor_id}/${meta.id}", mode: 'copy', overwrite: true
 
   input:
-  tuple val(meta), path(coverage), path(callvsqpos), path(pyrvsmask),
-        path(readbundles), path(burdens), path(variants),
-        path(discardedvariants), path(mismatches)
+  tuple val(meta), path(variants_csv)
+  path post_triNuc
+
+  output:
+  path("plots/*")
+
+  script:
+  """
+  mkdir -p plots
+  plot.R \
+    "./" \
+    "./plots/results" \
+    $post_triNuc
+  """
+  stub:
+  """
+  
+  """
+}
+
+process SUMMARY {
+  tag "${meta.id}"
+  publishDir "${params.out_dir}/${meta.donor_id}/${meta.id}", mode: 'copy', overwrite: true
+
+  input:
+  tuple val(meta), path(var_csvs)
 
   output:
   path("summary.txt")
 
   script:
   """
-  summary.R "./" > summary.txt
+  summary.R "./"
   """
   stub:
   """
@@ -671,6 +698,9 @@ workflow {
   // run indelcaller per partition, merge outputs
   INDEL(DSA.out.indel, fasta)
   INDEL_MERGE(INDEL.out.indel_merge.groupTuple(size: params.jobs))
+
+  // plot results
+  PLOT(VAR_MERGE_CSV.out.plot, post_triNuc)
 
   // summary statistics
   SUMMARY(VAR_MERGE_CSV.out.summary)

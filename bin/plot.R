@@ -43,42 +43,32 @@ READ_LENGTH = 151
 
 args = commandArgs(TRUE)
 
-if (length(args) == 0 || length(args) < 2 || length(args) > 3) {
-  message("nanoseq_results_plotter.R  directory  output_prefix [trinucleotide_frequencies_file]\n\n")
+if (length(args) == 0 || length(args) < 3) {
+  message("nanoseq_results_plotter.R  directory  output_prefix trinucleotide_frequencies_file\n\n")
   message("Must specify a directory with the various CSV files and a prefix for the output files.\n")
-  message("Optionally a file containing the background genomic (pyrimidine-based) trinucleotide absolute counts (for normalization purposes). If not provided, human frequencies will be assumed.\n\n")
+  message("A file containing the background genomic (pyrimidine-based) trinucleotide absolute counts (for normalization purposes).\n\n")
   message("This script generates a series of plots and tables summarizing the results of the variantcaller.\n\n")
   quit(save = "no", status = 1)
 }
 
 dir_res = args[1]
 out_name = args[2]
-if (length(args) == 3) {
-  message(sprintf("Reading genomic trinucleotide absolute counts from file: %s\n", args[3]))
-  order = c("ACA", "ACC", "ACG", "ACT", "ATA", "ATC", "ATG", "ATT", "CCA", "CCC", "CCG", "CCT", "CTA", "CTC", "CTG", "CTT",
-            "GCA", "GCC", "GCG", "GCT", "GTA", "GTC", "GTG", "GTT", "TCA", "TCC", "TCG", "TCT", "TTA", "TTC", "TTG", "TTT")
-  genome_counts_tmp = read.table(args[3], sep = "\t", stringsAsFactors = F, header = F, row.names = 1)
-  if (nrow(genome_counts_tmp) != length(order)) {
-    message(sprintf("%s not properly formatted. Expected %d rows, one for each pyrimidine trinucleotide\n", args[3], length(order)))
-    quit(save = "no", status = 0)
-  }
-  if (sum(genome_counts_tmp[, 1]) < 1e6) {
-    message(sprintf("%s does not seem to contain absolute counts.\n", args[3]))
-    quit(save = "no", status = 0)
-  }
-  genome_counts = vector()
-  genome_counts[rownames(genome_counts_tmp)] = genome_counts_tmp[, 1]
-  genome_counts = genome_counts[order]
-} else {
-  # human genome trinucleotide frequencies assumed
-  genome_counts = vector()
-  genome_counts[c("ACA", "ACC", "ACG", "ACT", "ATA", "ATC", "ATG", "ATT", "CCA", "CCC", "CCG", "CCT", "CTA", "CTC", "CTG", "CTT",
-                  "GCA", "GCC", "GCG", "GCT", "GTA", "GTC", "GTG", "GTT", "TCA", "TCC", "TCG", "TCT", "TTA", "TTC", "TTG", "TTT")] =
-                  c(115415924, 66550070, 14381094, 92058521, 117976329, 76401029, 105094288, 142651503, 105547494, 75238490,
-                    15801067, 101628641, 73791042, 96335416, 115950255, 114180747, 82414099, 68090507, 13621251, 80004082,
-                    64915540, 54055728, 86012414, 83421918, 112085858, 88336615, 12630597, 126566213, 119020255, 112827451,
-                    108406418, 219915599);
+
+message(sprintf("Reading genomic trinucleotide absolute counts from file: %s\n", args[3]))
+order = c("ACA", "ACC", "ACG", "ACT", "ATA", "ATC", "ATG", "ATT", "CCA", "CCC", "CCG", "CCT", "CTA", "CTC", "CTG", "CTT",
+          "GCA", "GCC", "GCG", "GCT", "GTA", "GTC", "GTG", "GTT", "TCA", "TCC", "TCG", "TCT", "TTA", "TTC", "TTG", "TTT")
+genome_counts_tmp = read.table(args[3], sep = "\t", stringsAsFactors = F, header = F, row.names = 1)
+if (nrow(genome_counts_tmp) != length(order)) {
+  message(sprintf("%s not properly formatted. Expected %d rows, one for each pyrimidine trinucleotide\n", args[3], length(order)))
+  quit(save = "no", status = 0)
 }
+if (sum(genome_counts_tmp[, 1]) < 1e6) {
+  message(sprintf("%s does not seem to contain absolute counts.\n", args[3]))
+  quit(save = "no", status = 0)
+}
+genome_counts = vector()
+genome_counts[rownames(genome_counts_tmp)] = genome_counts_tmp[, 1]
+genome_counts = genome_counts[order]
 
 if (!dir.exists(dir_res)) {
   stop("Directory : ", dir_res, " not found", call. = FALSE)
@@ -119,9 +109,7 @@ coverage <- sum(as.double(coverage$count))
 pyrvsmask <- pyrvsmask[, .(count = sum(count)), by = .(pyrcontext, ismasked)]
 
 # combine read bundles from merged bed files
-readbundles <- readbundles[, .(count = sum(count)), by = .(fwd, rev, ismasked,
-isvariant)]
-
+readbundles <- readbundles[, .(count = sum(count)), by = .(fwd, rev, ismasked, isvariant)]
 
 # unique variants
 #   unique defined by (chromosome, coordinate and substitution)
@@ -160,7 +148,6 @@ metrics <- data.frame("Metric" = c("total variants", "unique variants",
   (n_variants / (n_variants + n_reference)), coverage))
 
 print(metrics)
-
 
 ##########################################################################################
 # First PDF: asymmetries, 6 subst types (12 really)
