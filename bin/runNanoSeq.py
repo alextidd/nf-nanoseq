@@ -527,7 +527,7 @@ if (args.index is None or args.index == 1):
 if (args.subcommand == 'cov'):
     # build the chromosome dictionary, list and intervals
     if (args.exclude is None or args.exclude == ""):
-        excludes = []  # exlcude None
+        excludes = []  # exclude None
     else:
         excludes = [re.compile(istr + "$")
                     for istr in args.exclude.replace("%", ".+").split(',')]

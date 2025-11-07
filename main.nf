@@ -60,6 +60,59 @@ process CHECK_CONTIGS {
   """
 }
 
+process INTERVALS {
+  input:
+  tuple path(fasta), path(fai)
+
+  output:
+  tuple path("gIntervals.dat"), path("intervals.bed"), emit: intervals
+  path "contigs.txt", emit: contigs
+
+  script:
+  def int_include = params.int_include ? "--include ${params.int_include}" : ""
+  def int_exclude = params.int_exclude ? "--exclude ${params.int_exclude}" : ""
+  def int_larger = params.int_larger ? "--larger ${params.int_larger}" : ""
+  """
+  nanoseq_intervals.py \
+    --ref $fasta \
+    $int_include $int_exclude $int_larger
+  cut -f1 intervals.bed > contigs.txt
+  """
+  stub:
+  """
+  touch gIntervals.dat
+  touch intervals.bed
+  touch contigs.txt
+  """
+}
+
+process SUBSET {
+  tag "${meta.id}"
+
+  input:
+  tuple val(meta), path(bam), path(bai)
+  path(contigs)
+
+  output:
+  tuple val(meta),
+        path("${meta.id}_subset.bam"), path("${meta.id}_subset.bam.bai")
+
+  script:
+  """
+  # modules
+  module load samtools-1.19.2/python-3.11.6
+
+  # filter bam to included contigs only
+  samtools view --bam $bam \$(cat $contigs) --output ${meta.id}_subset.bam
+  samtools index ${meta.id}_subset.bam
+  """
+  stub:
+  """
+  touch ${meta.id}_subset.bam
+  touch ${meta.id}_subset.bam.bai
+  """
+}
+
 process PREPROCESS {
   tag "${meta.id}"
 
@@ -125,11 +178,11 @@ process EFFI {
   mkdir -p efficiency
 
   # calculate efficiency
-  efficiency_nanoseq.pl \
-    -threads $task.cpus \
-    -duplex $bundled_bam \
-    -dedup $dedup_bam \
-    -ref $fasta \
+  efficiency_nanoseq.pl \\
+    -threads $task.cpus \\
+    -duplex $bundled_bam \\
+    -dedup $dedup_bam \\
+    -ref $fasta \\
     -out efficiency/${meta.id}
   """
   stub:
@@ -137,31 +190,6 @@ process EFFI {
   mkdir -p efficiency
   touch efficiency/${meta.id}.RBs
   touch efficiency/${meta.id}.RBs.pdf
-  """
-}
-
-process INTERVALS {
-  input:
-  tuple path(fasta), path(fai)
-
-  output:
-  tuple path("gIntervals.dat"), path("intervals.bed"), emit: intervals
-  path "contigs.txt", emit: contigs
-
-  script:
-  def int_include = params.int_include ? "--include ${params.int_include}" : ""
-  def int_exclude = params.int_exclude ? "--exclude ${params.int_exclude}" : ""
-  def int_larger = params.int_larger ? "--larger ${params.int_larger}" : ""
-  """
-  nanoseq_intervals.py \
-    --ref $fasta \
-    $int_include $int_exclude $int_larger
-  cut -f1 intervals.bed > contigs.txt
-  """
-  stub:
-  """
-  touch gIntervals.dat
-  touch intervals.bed
   """
 }
 
@@ -246,16 +274,15 @@ process DSA {
 
   output:
   tuple val(meta), val(part_i),
-        path("dsa_${part_i}.bed.gz"), path("dsa_${part_i}.bed.gz.tbi"),
+        path("dsa_${part_i}.bed.gz"),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai),
         emit: indel
   tuple val(meta), val(part_i),
-        path("part_${part_i}.bed.gz"), path("dsa_${part_i}.bed.gz.tbi"),
+        path("dsa_${part_i}.bed.gz"),
         emit: var
 
   script:
-  // TODO: change `> dsa.bed` to `> dsa_${part_i}.bed`
   """
   # modules
   module add samtools-1.19/python-3.12.0 
@@ -282,7 +309,7 @@ process DSA {
   awk 'END{ if (NF != 45) print "Truncated dsa output file for partition $part_i !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' \
     dsa_${part_i}.bed
 
-  # bgzip and index
+  # bgzip and test integrity
   bgzip -f -l 2 dsa_${part_i}.bed
   sleep 2
   bgzip -t dsa_${part_i}.bed.gz
@@ -290,7 +317,6 @@ process DSA {
   stub:
   """
   touch dsa_${part_i}.bed.gz
-  touch dsa_${part_i}.bed.gz.tbi
   """
 }
 
@@ -298,10 +324,11 @@ process VAR {
   tag "${part_i}_${meta.id}"
 
   input:
-  tuple val(meta), val(part_i), path(dsa_bed), path(dsa_tbi)
+  tuple val(meta), val(part_i), path(dsa_bed)
 
   output:
   tuple val(meta), val(part_i), path("var_${part_i}.tsv"), emit: merge_vars
+  tuple val(meta), val(part_i), path("var_cov_${part_i}.bed.gz"), emit: merge_vars_cov
 
   script:
   """
@@ -330,7 +357,7 @@ process VAR {
   """
   touch var_${part_i}.tsv
   touch var_discarded_${part_i}.tsv
-  touch var_cov_${part_i}.bed
+  touch var_cov_${part_i}.bed.gz
   """
 }
 
@@ -353,26 +380,56 @@ process MERGE_VARS {
   """
 }
 
+process MERGE_VARS_COV {
+  tag "${meta.id}"
+
+  input:
+  tuple val(meta), val(partitions), path(vars_covs)
+
+  output:
+  tuple val(meta), path("results.cov.bed.gz"), path("results.cov.bed.gz.tbi")
+
+  script:
+  """
+  # modules
+  module load bcftools-1.19/python-3.11.6
+
+  # concat all var_cov files
+  > results.cov.bed
+  for var_cov in ${vars_covs.join(' ')} ; do
+    bgzip -dc \$var_cov >> results.cov.bed
+  done
+
+  # index and tabix
+  bgzip -@ 2 -f results.cov.bed
+  sleep 3
+  bgzip -@ 2 -t results.cov.bed.gz
+  tabix -f results.cov.bed.gz
+  """
+}
+
 process INDEL {
   tag "${part_i}_${meta.id}"
 
   input:
   tuple val(meta), val(part_i),
-        path(dsa_bed), path(dsa_tbi),
+        path(dsa_bed),
         path(duplex_bam), path(duplex_bai),
         path(normal_bam), path(normal_bai)
   tuple path(fasta), path(fai)
 
   output:
   tuple val(meta),
-        path("indel_${part_i}.bed.gz"),
-        path("indel_${part_i}.vcf.gz"),
         path("indel_${part_i}.filtered.vcf.gz"),
         path("indel_${part_i}.filtered.vcf.gz.tbi"),
         emit: merge_indels
 
   script:
   """
+  # modules
+  module add samtools-1.19/python-3.12.0
+  module add bcftools-1.19/python-3.11.6
+
   # step 1
   indelCaller_step1.pl \\
     -out indel_${part_i}.bed.gz \\
@@ -409,7 +466,48 @@ process INDEL {
   """
 }
 
-// process MERGE_INDELS
+process MERGE_INDELS {
+  tag "${meta.id}"
+
+  input:
+  tuple val(meta),
+        path(indel_filtered_vcfs), path(indel_filtered_tbis)
+
+  output:
+  tuple val(meta),
+        path("results.indel.vcf.gz"), path("results.indel.vcf.gz.tbi")
+
+  script:
+  """
+  # modules
+  module load bcftools-1.19/python-3.11.6
+
+  # merge vcfs
+  cp ${indel_filtered_vcfs[0]} merged.vcf.gz
+  for indel_vcf in ${indel_filtered_vcfs[1..-1].join(' ')} ; do
+    bcftools concat \\
+      --no-version -Oz \\
+      -o tmp.vcf.gz \\
+      merged.vcf.gz \\
+      \$indel_vcf
+    mv tmp.vcf.gz merged.vcf.gz
+  done
+
+  # sort and index
+  bcftools \
+    sort -Oz \
+    -o results.indel.vcf.gz \
+    merged.vcf.gz
+  bcftools index -t -f results.indel.vcf.gz
+  """
+  stub:
+  """
+  touch results.indel.vcf.gz
+  touch results.indel.vcf.gz.tbi
+  """
+}
+
+
 // process MERGE_VAR_COV
 // process SUMMARY
 
@@ -449,59 +547,32 @@ process POST {
 
 workflow {
 
-  // TODO: keep id with normal_bam (can have different matched normals for the same donor)
-
-  // get duplex bams
-  ch_duplex =
-    channel.fromPath(params.samplesheet)
-    .splitCsv(header: true)
-    .map { row ->
-            def meta = [donor_id: row.donor_id, id: row.id, type: "duplex"]
-            [meta, file(row.duplex_bam, checkIfExists: true)]
-    }
-
-  // get normal bams
-  ch_normal =
-    channel.fromPath(params.samplesheet)
-    .splitCsv(header: true)
-    .map { row ->
-            def meta = [donor_id: row.donor_id, id: row.donor_id + "_normal", type: "normal"]
-            [meta, file(row.normal_bam, checkIfExists: true)]
-    }
-    .unique()
-
   // get reference files
   fasta = [file(params.fasta, checkIfExists: true),
            file(params.fasta + ".fai", checkIfExists: true)]
   post_triNuc = file(params.post_triNuc, checkIfExists: true)
   dsa_noise_bed = [file(params.dsa_noise_bed, checkIfExists: true),
                    file(params.dsa_noise_bed + ".tbi", checkIfExists: true)]
+  
+  // get bams
+  ch_input =
+    channel.fromPath(params.samplesheet)
+    .splitCsv(header: true)
+    .map { row ->
+            def meta = [donor_id: row.donor_id, id: row.id]
+            [meta,
+             ["duplex", "normal"],
+             [file(row.duplex_bam, checkIfExists: true),
+              file(row.normal_bam, checkIfExists: true)]]
+    }
+    .transpose()
+    .map { meta, types, bams ->
+            def meta2 = meta + [type: types]
+            [meta2, bams]
+    }
 
   // index bams
-  SAMTOOLS_INDEX(ch_duplex.concat(ch_normal))
-
-  // split indexed channels again
-  ch_bams =
-    SAMTOOLS_INDEX.out
-    .branch { meta, bam, bai ->
-        duplex: meta.type == "duplex"
-        normal: meta.type == "normal"
-    }
-
-  // check that bam and ref contigs match
-  // TODO: keep meta.id with the donor, use in join
-  ch_check =
-    ch_bams.normal
-    .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
-    .join(
-        ch_bams.duplex.map { meta, bam, bai -> [ meta.donor_id, [meta, bam, bai] ] }
-    )
-    .map { donor_id, normal, duplex ->
-        def (normal_meta, normal_bam, normal_bai) = normal
-        def (duplex_meta, duplex_bam, duplex_bai) = duplex
-        tuple(duplex_meta, duplex_bam, duplex_bai, normal_bam, normal_bai)
-    }
-  CHECK_CONTIGS(ch_check, fasta)
+  SAMTOOLS_INDEX(ch_input)
 
   // get contig intervals
   INTERVALS(fasta)
@@ -511,35 +582,60 @@ workflow {
     INTERVALS.out.contigs
     .splitCsv()
 
+  // check that bam and ref contigs match
+  ch_bams =
+    SAMTOOLS_INDEX.out
+    .branch { meta, bam, bai ->
+        duplex: meta.type == "duplex"
+        normal: meta.type == "normal"
+    }
+  ch_check =
+    ch_bams.duplex
+    .map { meta, bam, bai -> [ meta.subMap('donor_id', 'id'), bam, bai ] }
+    .join(
+        ch_bams.normal
+          .map { meta, bam, bai -> [ meta.subMap('donor_id', 'id'), bam, bai ] }
+    )
+  CHECK_CONTIGS(ch_check, fasta)
+
+  // subset bams to included contigs only
+  ch_subset = SAMTOOLS_INDEX.out
+  SUBSET(ch_subset, INTERVALS.out.contigs)
+
   // preprocess duplex
-  PREPROCESS(ch_bams.duplex)
+  ch_preprocess_duplex =
+    SUBSET.out
+    .filter { meta, bam, bai -> meta.type == "duplex" }
+  PREPROCESS(ch_preprocess_duplex)
 
   // effi
   EFFI(PREPROCESS.out.effi, fasta)
 
-  // rejoin duplex and normal channels by donor id
-  // TODO: join by id
-  ch_input =
-    ch_bams.normal
-    .map { meta, bam, bai -> [ meta.donor_id, [meta.id, bam, bai] ] }
-    .join(
-        PREPROCESS.out.cov.map { meta, bam, bai -> [ meta.donor_id, [meta, bam, bai] ] }
-    )
-    .map { _donor_id, normal, duplex ->
-        def (_normal_meta, normal_bam, normal_bai) = normal
-        def (duplex_meta, duplex_bam, duplex_bai) = duplex
-        tuple(duplex_meta, duplex_bam, duplex_bai, normal_bam, normal_bai)
-    }
-  ch_input_per_chr = ch_input.combine(ch_contigs)
-  
+  // rejoin preprocessed duplex and normal bams
+  ch_nanoseq_duplex =
+    PREPROCESS.out.cov
+    .map { meta, bam, bai -> [meta.subMap('donor_id', 'id'), bam, bai] }
+  ch_nanoseq_normal =
+    SUBSET.out
+    .filter { meta, bam, bai -> meta.type == "normal" }
+    .map { meta, bam, bai -> [meta.subMap('donor_id', 'id'), bam, bai] }
+  ch_nanoseq = ch_nanoseq_duplex.join(ch_nanoseq_normal)
+
   // get coverage per 100bp bin per chromosome
-  COV(ch_input_per_chr, fasta)
+  ch_nanoseq_per_chr =
+    ch_nanoseq
+    .combine(ch_contigs.collect().map { [it] })
+    .map { meta, duplex_bam, duplex_bai, normal_bam, normal_bai, chrs ->
+            [groupKey(meta, chrs.size()),
+             duplex_bam, duplex_bai, normal_bam, normal_bai, chrs]
+    }
+    .transpose()
+  COV(ch_nanoseq_per_chr, fasta)
 
   // partition the genome into even chunks by coverage
-  // TODO: fix size to use number of contigs
   ch_partition =
     COV.out.part
-    .groupTuple(size: 27)
+    .groupTuple()
     .combine(INTERVALS.out.intervals)
   PART(ch_partition)
 
@@ -552,14 +648,17 @@ workflow {
       def partition_num = part_bed.name.replaceAll(/part_(\d+)\.bed/, '$1').toInteger()
       tuple(meta, partition_num, part_bed)
     }
-  DSA(ch_input.combine(ch_partitions, by: 0), fasta, dsa_noise_bed)
+  DSA(ch_nanoseq.combine(ch_partitions, by: 0), fasta, dsa_noise_bed)
 
   // run variantcaller per partition, merge outputs
   VAR(DSA.out.var)
   MERGE_VARS(VAR.out.merge_vars.groupTuple(size: params.jobs))
+  MERGE_VARS_COV(VAR.out.merge_vars_cov.groupTuple(size: params.jobs))
 
   // run indelcaller per partition, merge outputs
   INDEL(DSA.out.indel, fasta)
+  MERGE_INDELS(INDEL.out.merge_indels.groupTuple(size: params.jobs))
+
   // POST(INDEL.out.done, fasta, post_triNuc)
 
 }

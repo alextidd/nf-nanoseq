@@ -30,9 +30,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Check files
-    file_chk(args.ref, ".fai", "Reference", sys.exit)
-    
     # Build chromosome dictionary
     if args.exclude is None or args.exclude == "":
         excludes = []
