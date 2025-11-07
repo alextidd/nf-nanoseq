@@ -44,7 +44,7 @@ READ_LENGTH = 151
 args = commandArgs(TRUE)
 
 if (length(args) == 0 || length(args) < 3) {
-  message("nanoseq_results_plotter.R  directory  output_prefix trinucleotide_frequencies_file\n\n")
+  message("plot.R  directory  output_prefix trinucleotide_frequencies_file\n\n")
   message("Must specify a directory with the various CSV files and a prefix for the output files.\n")
   message("A file containing the background genomic (pyrimidine-based) trinucleotide absolute counts (for normalization purposes).\n\n")
   message("This script generates a series of plots and tables summarizing the results of the variantcaller.\n\n")

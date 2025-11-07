@@ -74,7 +74,7 @@ $ext =~ s/.$/i/;
 die ("\nIndex for $merged_bam $ext not found!\n") unless ( -e "$merged_bam".$ext );
 die ("\nsamtools not found in path\n") unless ( which 'samtools' );
 die ("\nRscript not found in path\n") unless ( which 'Rscript' );
-die ("\nefficiency_nanoseq.R must be in path\n") unless ( which 'efficiency_nanoseq.R' );
+die ("\nefficiency.R must be in path\n") unless ( which 'efficiency.R' );
 my $do_panel;
 if ($panel ) {
   die ("\nTargeted panel $panel not found\n") unless( -e $panel );
@@ -182,7 +182,7 @@ close(OUT);
 ##########################################################################################
 # Call R to get the two values that inform on strand misses:
 my($reads_per_rb,$f_eff,$zib_eff,$ok_rbs,$total_rbs,$gc_both,$gc_single,$total_reads);
-my $cmd = "efficiency_nanoseq.R $rb_output $ref_genome ";
+my $cmd = "efficiency.R $rb_output $ref_genome ";
 print STDOUT "Running: $cmd\n";
 my ($stdout, $stderr, $exit) = capture {
   system($cmd);
@@ -239,11 +239,11 @@ close(OUT);
 __END__
 =head1 NAME
 
-efficiency_nanoseq.pl
+efficiency.pl
 
 =head1 SYNOPSIS
 
-efficiency_nanoseq.pl [-h] [-t n] [-p panel ] -dedup BAM -duplex BAM -o prefix -r reference
+efficiency.pl [-h] [-t n] [-p panel ] -dedup BAM -duplex BAM -o prefix -r reference
 
     -dedup             -d   Deduplicated BAM
     -duplex            -x   Duplex BAM

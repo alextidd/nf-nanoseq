@@ -6,8 +6,8 @@ import re
 import json
 import pickle
 import argparse
-from nanoseq_utils import file_chk
-from nanoseq_ginterval import GInterval
+from utils import file_chk
+from ginterval import GInterval
 
 def main():
     parser = argparse.ArgumentParser(

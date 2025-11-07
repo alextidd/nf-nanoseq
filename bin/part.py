@@ -8,7 +8,7 @@ import argparse
 import math
 import gzip
 import copy
-from nanoseq_ginterval import GInterval
+from ginterval import GInterval
 
 def main():
     parser = argparse.ArgumentParser(
@@ -23,7 +23,7 @@ def main():
     parser_req.add_argument('--chrs', type=str, action='store',
                             required=True, help='comma-separated list of contigs to process')
     parser_req.add_argument('--gintervals', type=str, action='store',
-                            required=True, help='gIntervals.dat file from nanoseq_intervals.py')
+                            required=True, help='gIntervals.dat file from intervals.py')
     
     # Optional arguments
     parser_opt.add_argument('--excludeBED', action='store',

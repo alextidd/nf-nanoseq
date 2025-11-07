@@ -1,6 +1,5 @@
 import sys
 import subprocess
-import tempfile
 import os
 import re
 import shutil
@@ -55,7 +54,7 @@ def vcfHeader(args):
     header += '##FILTER=<ID=PASS,Description="All filters passed">\n'
     header += "##reference=file://%s\n" % (args.ref)
 
-    from nanoseq_ginterval import GInterval
+    from ginterval import GInterval
     contigs = []
     with open(args.ref + ".fai", 'r') as iofile:
         for iline in iofile:

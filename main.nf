@@ -73,7 +73,7 @@ process INTERVALS {
   def int_exclude = params.int_exclude ? "--exclude ${params.int_exclude}" : ""
   def int_larger = params.int_larger ? "--larger ${params.int_larger}" : ""
   """
-  nanoseq_intervals.py \
+  intervals.py \
     --ref $fasta \
     $int_include $int_exclude $int_larger
   cut -f1 intervals.bed > contigs.txt
@@ -178,7 +178,7 @@ process EFFI {
   mkdir -p efficiency
 
   # calculate efficiency
-  efficiency_nanoseq.pl \\
+  efficiency.pl \\
     -threads $task.cpus \\
     -duplex $bundled_bam \\
     -dedup $dedup_bam \\
@@ -244,9 +244,9 @@ process PART {
   script:
   def excludeBED = params.part_excludeBED ? "--excludeBED ${params.part_excludeBED}" : ""
   """
-  # TODO: move excludeCov and excludeBED functionalities of nanoseq_part.py to command line
+  # TODO: move excludeCov and excludeBED functionalities of part.py to command line
   # excludeCov is RENanoSeq-specific
-  nanoseq_part.py \\
+  part.py \\
     --jobs ${params.jobs} \\
     --excludeCov ${params.part_excludeCov} \\
     --chrs ${chrs.join(',')} \\
@@ -377,7 +377,7 @@ process VAR_MERGE_CSV {
 
   script:
   """
-  nanoseq_var_merge_csv.py \\
+  var_merge_csv.py \\
     --partitions ${partitions.join(',')}
   """
 }
@@ -395,7 +395,7 @@ process VAR_VCF {
 
   script:
   """
-  nanoseq_var_vcf.py \\
+  var_vcf.py \\
     --variants_csv $vars_csv \\
     --ref_fai $fai \\
     --sample ${meta.id} \\
