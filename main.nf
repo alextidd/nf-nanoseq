@@ -327,8 +327,9 @@ process VAR {
   tuple val(meta), val(part_i), path(dsa_bed)
 
   output:
-  tuple val(meta), val(part_i), path("var_${part_i}.tsv"), emit: merge_vars
-  tuple val(meta), val(part_i), path("var_cov_${part_i}.bed.gz"), emit: merge_vars_cov
+  tuple val(meta), val(part_i), path("var_${part_i}.tsv"), emit: var_vcf
+  tuple val(meta), val(part_i), path("var_${part_i}.tsv"), emit: var_merge_csv
+  tuple val(meta), val(part_i), path("var_cov_${part_i}.bed.gz"), emit: var_merge_cov
 
   script:
   """
@@ -361,7 +362,7 @@ process VAR {
   """
 }
 
-process MERGE_VARS {
+process VAR_MERGE_CSV {
   tag "${meta.id}"
 
   input:
@@ -371,16 +372,37 @@ process MERGE_VARS {
   tuple val(meta),
         path("coverage.csv"), path("callvsqpos.csv"), path("pyrvsmask.csv"),
         path("readbundles.csv"), path("burdens.csv"), path("variants.csv"),
-        path("discardedvariants.csv"), path("mismatches.csv")
+        path("discardedvariants.csv"), path("mismatches.csv"), emit: summary
+  tuple val(meta), path("variants.csv"), emit: var_vcf
 
   script:
   """
-  nanoseq_merge_vars.py \\
+  nanoseq_var_merge_csv.py \\
     --partitions ${partitions.join(',')}
   """
 }
 
-process MERGE_VARS_COV {
+process VAR_VCF {
+  tag "${meta.id}"
+
+  input:
+  tuple val(meta), path(vars_csv)
+  tuple path(fasta), path(fai)
+
+  output:
+  tuple val(meta), path("results.muts.vcf.gz")
+
+  script:
+  """
+  nanoseq_var_vcf.py \\
+    --variants_csv $vars_csv \\
+    --ref_fai $fai \\
+    --sample ${meta.id} \\
+    --output results.muts.vcf.gz
+  """
+}
+
+process VAR_MERGE_COV {
   tag "${meta.id}"
 
   input:
@@ -397,8 +419,11 @@ process MERGE_VARS_COV {
   # concat all var_cov files
   > results.cov.bed
   for var_cov in ${vars_covs.join(' ')} ; do
-    bgzip -dc \$var_cov >> results.cov.bed
+    bgzip -dc \$var_cov >> results_unsorted.cov.bed
   done
+
+  # sort bed
+  sort -k1,1 -k2,2n results_unsorted.cov.bed > results.cov.bed
 
   # index and tabix
   bgzip -@ 2 -f results.cov.bed
@@ -419,10 +444,10 @@ process INDEL {
   tuple path(fasta), path(fai)
 
   output:
-  tuple val(meta),
+  tuple val(meta), val(part_i),
         path("indel_${part_i}.filtered.vcf.gz"),
         path("indel_${part_i}.filtered.vcf.gz.tbi"),
-        emit: merge_indels
+        emit: indel_merge
 
   script:
   """
@@ -466,11 +491,11 @@ process INDEL {
   """
 }
 
-process MERGE_INDELS {
+process INDEL_MERGE {
   tag "${meta.id}"
 
   input:
-  tuple val(meta),
+  tuple val(meta), val(partitions),
         path(indel_filtered_vcfs), path(indel_filtered_tbis)
 
   output:
@@ -482,14 +507,18 @@ process MERGE_INDELS {
   # modules
   module load bcftools-1.19/python-3.11.6
 
-  # merge vcfs
-  cp ${indel_filtered_vcfs[0]} merged.vcf.gz
-  for indel_vcf in ${indel_filtered_vcfs[1..-1].join(' ')} ; do
+  # initialise merged vcfs
+  cp indel_1.filtered.vcf.gz merged.vcf.gz
+
+  # merge indels
+  echo -e "${partitions.join('\\n')}" |
+  sort -n | sed 1d |
+  while read part_i ; do
     bcftools concat \\
       --no-version -Oz \\
       -o tmp.vcf.gz \\
       merged.vcf.gz \\
-      \$indel_vcf
+      indel_\${part_i}.filtered.vcf.gz
     mv tmp.vcf.gz merged.vcf.gz
   done
 
@@ -507,41 +536,24 @@ process MERGE_INDELS {
   """
 }
 
-
-// process MERGE_VAR_COV
-// process SUMMARY
-
-process POST {
+process SUMMARY {
   tag "${meta.id}"
 
   input:
-  tuple val(meta),
-        path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai)
-  tuple path(fasta), path(fai)
-  path(post_triNuc)
+  tuple val(meta), path(coverage), path(callvsqpos), path(pyrvsmask),
+        path(readbundles), path(burdens), path(variants),
+        path(discardedvariants), path(mismatches)
 
   output:
-  tuple val(meta),
-        path(duplex_bam), path(duplex_bai),
-        path(normal_bam), path(normal_bai), emit: done
-  tuple val(meta), path("tmpNanoSeq/post/*"), emit: post
+  path("summary.txt")
 
   script:
   """
-  # modules
-  module add samtools-1.19/python-3.12.0 
-  module load perl-5.30.0 
-  module load bcftools-1.19/python-3.11.6
-
-  # run
-  runNanoSeq.py \
-    --threads $task.cpus  \
-    --normal $normal_bam \
-    --duplex $duplex_bam \
-    --ref $fasta \
-    post \
-    --triNuc $post_triNuc
+  summary.R "./" > summary.txt
+  """
+  stub:
+  """
+  touch summary.txt
   """
 }
 
@@ -652,13 +664,15 @@ workflow {
 
   // run variantcaller per partition, merge outputs
   VAR(DSA.out.var)
-  MERGE_VARS(VAR.out.merge_vars.groupTuple(size: params.jobs))
-  MERGE_VARS_COV(VAR.out.merge_vars_cov.groupTuple(size: params.jobs))
+  VAR_MERGE_CSV(VAR.out.var_merge_csv.groupTuple(size: params.jobs))
+  VAR_VCF(VAR_MERGE_CSV.out.var_vcf, fasta)
+  VAR_MERGE_COV(VAR.out.var_merge_cov.groupTuple(size: params.jobs))
 
   // run indelcaller per partition, merge outputs
   INDEL(DSA.out.indel, fasta)
-  MERGE_INDELS(INDEL.out.merge_indels.groupTuple(size: params.jobs))
+  INDEL_MERGE(INDEL.out.indel_merge.groupTuple(size: params.jobs))
 
-  // POST(INDEL.out.done, fasta, post_triNuc)
+  // summary statistics
+  SUMMARY(VAR_MERGE_CSV.out.summary)
 
 }

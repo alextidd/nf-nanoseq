@@ -79,7 +79,6 @@ readbundles <- fread(paste(dirname, 'readbundles.csv', sep = "/"))
 variants <- fread(paste(dirname, 'variants.csv', sep = "/"))
 mismatches <- fread(paste(dirname, 'mismatches.csv', sep = "/"))
 
-
 # combine burdens from merged bed files
 burdens <- burdens[, .(count = sum(count)), by = .(ismasked, isvariant)]
 
