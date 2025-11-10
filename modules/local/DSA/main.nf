@@ -25,10 +25,14 @@ process DSA {
   module add samtools-1.19/python-3.12.0 
   module load bcftools-1.19/python-3.11.6
 
-  # run dsa per partition segment
+  # initialise dsa file
   > dsa_${part_i}.bed
+
+  # run dsa per partition segment
   cat $part_bed |
   while read -r chr start end ; do
+
+    # write dsa output per region
     dsa \\
       -A $normal_bam \\
       -B $duplex_bam \\
@@ -39,12 +43,19 @@ process DSA {
       -M ${params.dsa_M} \\
       -t \\
       -r "\$chr" -b \$start -e \$end \\
-      >> dsa_${part_i}.bed ;
-  done
+      > dsa_${part_i}_\${chr}_\${start}_\${end}.bed ;
+    
+    # check number of fields for truncation - should be 45
+    awk 'END{ if (NF != 45) print "Truncated dsa output file for region \$chr:\$start-\$end !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' \
+      dsa_${part_i}_\${chr}_\${start}_\${end}.bed
 
-  # check number of fields for truncation - should be 45
-  awk 'END{ if (NF != 45) print "Truncated dsa output file for partition $part_i !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' \
-    dsa_${part_i}.bed
+    # append to final output
+    cat dsa_${part_i}_\${chr}_\${start}_\${end}.bed >> dsa_${part_i}.bed
+
+    # remove intermediate
+    rm dsa_${part_i}_\${chr}_\${start}_\${end}.bed
+
+  done
 
   # bgzip and test integrity
   bgzip -f -l 2 dsa_${part_i}.bed
