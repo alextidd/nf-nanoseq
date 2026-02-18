@@ -1,5 +1,10 @@
 #!/usr/bin/env nextflow
 
+// TODO: split PREPROCESS to ADD_RB and DEDUP
+// TODO: add verifybamid
+// TODO: add short version (remap, deduplex)
+// TODO: allow input from fastq (+ alignment) or crams / bams
+
 // using DSL-2
 nextflow.enable.dsl=2
 
@@ -39,10 +44,17 @@ workflow {
     .splitCsv(header: true)
     .map { row ->
             def meta = [donor_id: row.donor_id, id: row.id]
-            [meta,
-             ["duplex", "normal"],
-             [file(row.duplex_bam, checkIfExists: true),
-              file(row.normal_bam, checkIfExists: true)]]
+            if (params.dedup_as_normal) {
+              // only duplex_bam required when using dedup as normal
+              [meta,
+               ["duplex"],
+               [file(row.duplex_bam, checkIfExists: true)]]
+            } else {
+              [meta,
+               ["duplex", "normal"],
+               [file(row.duplex_bam, checkIfExists: true),
+                file(row.normal_bam, checkIfExists: true)]]
+            }
     }
     .transpose()
     .map { meta, types, bams ->
@@ -68,14 +80,22 @@ workflow {
         duplex: meta.type == "duplex"
         normal: meta.type == "normal"
     }
-  ch_check =
-    ch_bams.duplex
-    .map { meta, bam, bai -> [ meta.subMap('donor_id', 'id'), bam, bai ] }
-    .join(
-        ch_bams.normal
-          .map { meta, bam, bai -> [ meta.subMap('donor_id', 'id'), bam, bai ] }
-    )
-  CHECK_CONTIGS(ch_check, fasta)
+  if (params.dedup_as_normal) {
+    // only check duplex vs reference when using dedup as normal
+    ch_check =
+      ch_bams.duplex
+      .map { meta, bam, bai -> [ meta.subMap('donor_id', 'id'), bam, bai, bam, bai ] }
+    CHECK_CONTIGS(ch_check, fasta)
+  } else {
+    ch_check =
+      ch_bams.duplex
+      .map { meta, bam, bai -> [ meta.subMap('donor_id', 'id'), bam, bai ] }
+      .join(
+          ch_bams.normal
+            .map { meta, bam, bai -> [ meta.subMap('donor_id', 'id'), bam, bai ] }
+      )
+    CHECK_CONTIGS(ch_check, fasta)
+  }
 
   // subset bams to included contigs only
   ch_subset = SAMTOOLS_INDEX.out
@@ -94,16 +114,24 @@ workflow {
   ch_nanoseq_duplex =
     PREPROCESS.out.cov
     .map { meta, bam, bai -> [meta.subMap('donor_id', 'id'), bam, bai] }
-  ch_nanoseq_normal =
-    SUBSET.out
-    .filter { meta, bam, bai -> meta.type == "normal" }
-    .map { meta, bam, bai -> [meta.subMap('donor_id', 'id'), bam, bai] }
+  if (params.dedup_as_normal) {
+    // use dedup bam as normal when dedup_as_normal is enabled
+    ch_nanoseq_normal =
+      PREPROCESS.out.effi
+      .map { meta, bundled_bam, bundled_bai, dedup_bam, dedup_bai ->
+              [meta.subMap('donor_id', 'id'), dedup_bam, dedup_bai] }
+  } else {
+    ch_nanoseq_normal =
+      SUBSET.out
+      .filter { meta, bam, bai -> meta.type == "normal" }
+      .map { meta, bam, bai -> [meta.subMap('donor_id', 'id'), bam, bai] }
+  }
   ch_nanoseq = ch_nanoseq_duplex.join(ch_nanoseq_normal)
 
   // get coverage per 100bp bin per chromosome
   ch_nanoseq_per_chr =
     ch_nanoseq
-    .combine(ch_contigs.collect().map { [it] })
+    .combine(ch_contigs.collect().map { it -> [it] })
     .map { meta, duplex_bam, duplex_bai, normal_bam, normal_bai, chrs ->
             [groupKey(meta, chrs.size()),
              duplex_bam, duplex_bai, normal_bam, normal_bai, chrs]
