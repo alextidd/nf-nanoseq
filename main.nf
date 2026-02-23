@@ -4,6 +4,7 @@
 // TODO: add verifybamid
 // TODO: add short version (remap, deduplex)
 // TODO: allow input from fastq (+ alignment) or crams / bams
+// TODO: set default out_dir to ./
 
 // using DSL-2
 nextflow.enable.dsl=2
