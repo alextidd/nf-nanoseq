@@ -77,73 +77,63 @@ def chr_sort_key(chrom):
         return (3, chrom_clean)
 
 def parse_variants_csv(csv_file):
-    """Parse variants.csv file and return list of variant dictionaries"""
+    """Parse variants.csv file and return list of variant dictionaries
+
+    NOTE: old pipeline (runNanoSeq.py) writes CSVs with header names like
+    `chrom,chromStart,context,...,call,...`. To mirror that behaviour we
+    provide a simple parser but the main conversion below uses the same
+    code-path as runNanoSeq: reading the CSV into a dict-of-lists and
+    writing VCF rows by index.
+    """
     variants = []
-    
     with open(csv_file, 'r') as f:
-        header = f.readline().strip().split(',')
-        
+        header = f.readline().rstrip('\n').split(',')
         for line in f:
             if not line.strip():
                 continue
-            
-            fields = line.strip().split(',')
+            fields = line.rstrip('\n').split(',')
+            # pad shorter rows so zip won't miss columns
             if len(fields) < len(header):
-                continue
-            
+                fields += [''] * (len(header) - len(fields))
             variant = dict(zip(header, fields))
             variants.append(variant)
-    
     return variants
 
-def variant_to_vcf_line(variant):
-    """Convert variant dictionary to VCF line"""
-    chrom = variant.get('chr', '.')
-    pos = variant.get('pos', '.')
-    ref = variant.get('ref', '.')
-    alt = variant.get('mut', '.')
-    
-    # Build INFO field
-    info_parts = []
-    
-    if 'btag' in variant and variant['btag']:
-        info_parts.append(f"BTAG={variant['btag']}")
-    if 'bbeg' in variant and variant['bbeg']:
-        info_parts.append(f"BBEG={variant['bbeg']}")
-    if 'bend' in variant and variant['bend']:
-        info_parts.append(f"BEND={variant['bend']}")
-    if 'tri' in variant and variant['tri']:
-        info_parts.append(f"TRI={variant['tri']}")
-    if 'qpos' in variant and variant['qpos']:
-        info_parts.append(f"QPOS={variant['qpos']}")
-    if 'dplx_fwd_total' in variant and variant['dplx_fwd_total']:
-        info_parts.append(f"DEPTH_FWD={variant['dplx_fwd_total']}")
-    if 'dplx_rev_total' in variant and variant['dplx_rev_total']:
-        info_parts.append(f"DEPTH_REV={variant['dplx_rev_total']}")
-    if 'bulk_fwd_total' in variant and variant['bulk_fwd_total']:
-        info_parts.append(f"DEPTH_NORM_FWD={variant['bulk_fwd_total']}")
-    if 'bulk_rev_total' in variant and variant['bulk_rev_total']:
-        info_parts.append(f"DEPTH_NORM_REV={variant['bulk_rev_total']}")
-    if 'dplx_asxs' in variant and variant['dplx_asxs']:
-        info_parts.append(f"DPLX_ASXS={variant['dplx_asxs']}")
-    if 'dplx_clip' in variant and variant['dplx_clip']:
-        info_parts.append(f"DPLX_CLIP={variant['dplx_clip']}")
-    if 'dplx_nm' in variant and variant['dplx_nm']:
-        info_parts.append(f"DPLX_NM={variant['dplx_nm']}")
-    if 'bulk_asxs' in variant and variant['bulk_asxs']:
-        info_parts.append(f"BULK_ASXS={variant['bulk_asxs']}")
-    if 'bulk_nm' in variant and variant['bulk_nm']:
-        info_parts.append(f"BULK_NM={variant['bulk_nm']}")
-    
-    info = ';'.join(info_parts) if info_parts else '.'
-    
-    # Determine filter status
-    filter_status = variant.get('filter', 'PASS')
-    if filter_status == '':
-        filter_status = 'PASS'
-    
-    # VCF line
-    return f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\t{filter_status}\t{info}\n"
+def variant_to_vcf_line_from_var_dict(var, i):
+    """Build VCF line using the same fields/logic as runNanoSeq.py.
+
+    `var` is a dict-of-lists produced by reading `variants.csv` and `i`
+    is the index of the variant to write.
+    """
+    def _get(key):
+        return var.get(key, [''])[i] if key in var else ''
+
+    chrom = _get('chrom') or '.'
+    chromStart = _get('chromStart') or ''
+    try:
+        pos = int(chromStart) + 1 if chromStart != '' else '.'
+    except ValueError:
+        pos = '.'
+
+    # REF comes from middle base of context, ALT comes from call
+    context = _get('context')
+    ref = context[1] if context and len(context) > 1 else '.'
+    alt = _get('call') or '.'
+
+    # determine filter
+    ifilter = 'PASS'
+    if _get('shearwater') == '1':
+        ifilter = 'shearwater'
+    if _get('commonSNP') == '1':
+        ifilter = 'dbsnp'
+
+    # INFO fields (same order as runNanoSeq)
+    info = 'BTAG=%s;BBEG=%s;BEND=%s;TRI=%s;QPOS=%s;DEPTH_FWD=%s;DEPTH_REV=%s;DEPTH_NORM_FWD=%s;DEPTH_NORM_REV=%s;DPLX_ASXS=%s;DPLX_CLIP=%s;DPLX_NM=%s;BULK_ASXS=%s;BULK_NM=%s' % (
+        _get('dplxBarcode'), _get('dplxBreakpointBeg'), _get('dplxBreakpointEnd'), _get('pyrsub'), _get('qpos'),
+        _get('dplxfwdTotal'), _get('dplxrevTotal'), _get('bulkForwardTotal'), _get('bulkReverseTotal'),
+        _get('dplxASXS'), _get('dplxCLIP'), _get('dplxNM'), _get('bulkASXS'), _get('bulkNM'))
+
+    return f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\t{ifilter}\t{info}\n"
 
 def main():
     parser = argparse.ArgumentParser(
@@ -161,28 +151,40 @@ def main():
     args = parser.parse_args()
     
     print(f"Reading variants from {args.variants_csv}...")
-    
-    # Parse variants
-    variants = parse_variants_csv(args.variants_csv)
-    
-    print(f"Found {len(variants)} variants")
-    
-    # Sort variants by chromosome and position
-    variants.sort(key=lambda v: (chr_sort_key(v.get('chr', '')), 
-                                  int(v.get('pos', 0)) if v.get('pos', '0').isdigit() else 0))
-    
+
+    # Read csv into dict-of-lists (same approach as runNanoSeq.py)
+    var = {}
+    nVariants = 0
+    with open(args.variants_csv, 'r') as iofile:
+        iline = iofile.readline().rstrip('\n')
+        fields = iline.split(',')
+        for ifield in fields:
+            var[ifield] = []
+        for iline in iofile:
+            if not iline.rstrip('\n'):
+                continue
+            nVariants += 1
+            parts = iline.rstrip('\n').split(',')
+            # pad to header length
+            if len(parts) < len(fields):
+                parts += [''] * (len(fields) - len(parts))
+            for (i, ival) in enumerate(parts):
+                var[fields[i]].append(ival)
+
+    # added so code will not break with older files
+    if ('dplxBarcode' not in var) or len(var.get('dplxBarcode', [])) == 0:
+        var['dplxBarcode'] = [''] * nVariants
+
+    print(f"Found {nVariants} variants")
     print(f"Writing VCF to {args.output}...")
-    
-    # Write VCF
+
+    # write VCF header and body
     with gzip.open(args.output, 'wt') as vcf:
-        # Write header
         vcf.write(vcfHeader(args.ref_fai, args.sample))
-        
-        # Write variants
-        for variant in variants:
-            vcf.write(variant_to_vcf_line(variant))
-    
-    print(f"Successfully wrote {len(variants)} variants to {args.output}")
+        for i in range(nVariants):
+            vcf.write(variant_to_vcf_line_from_var_dict(var, i))
+
+    print(f"Successfully wrote {nVariants} variants to {args.output}")
 
 if __name__ == '__main__':
     main()
