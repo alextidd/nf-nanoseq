@@ -7,14 +7,18 @@ process VAR_VCF {
   tuple path(fasta), path(fai)
 
   output:
-  tuple val(meta), path("results.muts.vcf.gz")
+  tuple val(meta), path("results.muts.vcf.gz"), path("results.muts.vcf.gz.tbi")
 
   script:
   """
+  module load bcftools-1.19/python-3.11.6
+  
   var_vcf.py \\
     --variants_csv $vars_csv \\
     --ref_fai $fai \\
     --sample ${meta.id} \\
     --output results.muts.vcf.gz
+  
+  bcftools index -t -f results.muts.vcf.gz
   """
 }
