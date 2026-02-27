@@ -8,6 +8,7 @@ process DSA {
         val(part_i), path(part_bed)
   tuple path(fasta), path(fai)
   tuple path(dsa_noise_bed), path(dsa_noise_tbi)
+  tuple path(dsa_snp_bed), path(dsa_snp_tbi)
 
   output:
   tuple val(meta), val(part_i),
@@ -36,14 +37,14 @@ process DSA {
     dsa \\
       -A $normal_bam \\
       -B $duplex_bam \\
+      -C $dsa_snp_bed \\
       -D $dsa_noise_bed \\
       -R $fasta \\
-      -d ${params.dsa_d} \\
       -Q ${params.dsa_q} \\
       -M ${params.dsa_M} \\
-      -t \\
       -r "\$chr" -b \$start -e \$end \\
-      > dsa_${part_i}_\${chr}_\${start}_\${end}.bed ;
+      -d ${params.dsa_d} \\
+      -O dsa_${part_i}_\${chr}_\${start}_\${end}.bed ;
     
     # check number of fields for truncation - should be 45
     awk 'END{ if (NF != 45) print "Truncated dsa output file for region \$chr:\$start-\$end !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' \

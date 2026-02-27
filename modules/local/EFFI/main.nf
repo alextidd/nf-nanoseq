@@ -7,11 +7,13 @@ process EFFI {
         path(bundled_bam), path(bundled_bai),
         path(dedup_bam), path(dedup_bai)
   tuple path(fasta), path(fai)
+  path effi_panel_bed
 
   output:
   tuple val(meta), path("efficiency/${meta.id}*")
 
   script:
+  def effi_panel_bed_opt = effi_panel_bed.name != 'NO_FILE' ? "-panel $effi_panel_bed" : ''
   """
   # modules
   module add samtools-1.19/python-3.12.0 
@@ -28,7 +30,8 @@ process EFFI {
     -duplex $bundled_bam \\
     -dedup $dedup_bam \\
     -ref $fasta \\
-    -out efficiency/${meta.id}
+    -out efficiency/${meta.id} \\
+    $effi_panel_bed_opt
   """
   stub:
   """
