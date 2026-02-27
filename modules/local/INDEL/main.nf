@@ -28,7 +28,7 @@ process INDEL {
     -trim5 ${params.indel_t5} \\
     -min-coverage ${params.indel_z} \\
     -max-vaf ${params.indel_v} \\
-    -min-as-xs ${params.indel_a} \\
+    -min-asxs ${params.indel_a} \\
     -max-clip ${params.indel_c} \\
     $dsa_bed
 

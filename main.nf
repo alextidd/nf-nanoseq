@@ -35,10 +35,13 @@ workflow {
   // get reference files
   fasta = [file(params.fasta, checkIfExists: true),
            file(params.fasta + ".fai", checkIfExists: true)]
-  post_triNuc = file(params.post_triNuc, checkIfExists: true)
+  effi_panel_bed = file(params.effi_panel_bed, checkIfExists: true)
   dsa_noise_bed = [file(params.dsa_noise_bed, checkIfExists: true),
                    file(params.dsa_noise_bed + ".tbi", checkIfExists: true)]
-  
+  dsa_snp_bed = [file(params.dsa_snp_bed, checkIfExists: true),
+             file(params.dsa_snp_bed + ".tbi", checkIfExists: true)]
+  post_triNuc = file(params.post_triNuc, checkIfExists: true)
+
   // get bams
   ch_input =
     channel.fromPath(params.samplesheet)
@@ -109,7 +112,7 @@ workflow {
   PREPROCESS(ch_preprocess_duplex)
 
   // effi
-  EFFI(PREPROCESS.out.effi, fasta)
+  EFFI(PREPROCESS.out.effi, fasta, effi_panel_bed)
 
   // rejoin preprocessed duplex and normal bams
   ch_nanoseq_duplex =
@@ -156,7 +159,7 @@ workflow {
       def partition_num = part_bed.name.replaceAll(/part_(\d+)\.bed/, '$1').toInteger()
       tuple(meta, partition_num, part_bed)
     }
-  DSA(ch_nanoseq.combine(ch_partitions, by: 0), fasta, dsa_noise_bed)
+  DSA(ch_nanoseq.combine(ch_partitions, by: 0), fasta, dsa_noise_bed, dsa_snp_bed)
 
   // run variantcaller per partition, merge outputs
   VAR(DSA.out.var)
