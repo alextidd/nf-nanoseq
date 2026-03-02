@@ -33,6 +33,9 @@ process DSA {
   cat $part_bed |
   while read -r chr start end ; do
 
+    file="part_${part_i}_\${chr}_\${start}_\${end}.bed"
+    echo \$file
+
     # write dsa output per region
     dsa \\
       -A $normal_bam \\
@@ -44,21 +47,40 @@ process DSA {
       -M ${params.dsa_M} \\
       -r "\$chr" -b \$start -e \$end \\
       -d ${params.dsa_d} \\
-      -O dsa_${part_i}_\${chr}_\${start}_\${end}.bed ;
+      -O \$file ;
     
     # check number of fields for truncation - should be 45
-    awk 'END{ if (NF != 45) print "Truncated dsa output file for region \$chr:\$start-\$end !" > "/dev/stderr"}{ if (NF != 45) exit 1 }' \
-      dsa_${part_i}_\${chr}_\${start}_\${end}.bed
+    zcat \$file.gz |
+    awk -v file="\$file" '
+    /^#/ { next }   # skip header/comment lines
+
+    {
+        data_lines++
+        last_nf = NF
+    }
+
+    END {
+        if (data_lines == 0) {
+            print "WARNING: No data lines in " file > "/dev/stderr"
+            exit 0
+        }
+
+        if (last_nf < 45) {
+            print "ERROR: Final data line has " last_nf \\
+                  " fields (<45) in " file > "/dev/stderr"
+            exit 1
+        }
+    }'
 
     # append to final output
-    cat dsa_${part_i}_\${chr}_\${start}_\${end}.bed >> dsa_${part_i}.bed
+    cat \$file >> dsa_${part_i}.bed
 
     # remove intermediate
-    rm dsa_${part_i}_\${chr}_\${start}_\${end}.bed
+    rm \$file
 
   done
 
-  # bgzip and test integrity
+  # bgzip, test integrity, index
   bgzip -f -l 2 dsa_${part_i}.bed
   sleep 2
   bgzip -t dsa_${part_i}.bed.gz
