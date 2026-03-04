@@ -51,7 +51,7 @@ process DSA {
     
     # check number of fields for truncation - should be 45
     zcat \$file.gz |
-    awk -v file="\$file" '
+    awk -v file="\$file.gz" '
     /^#/ { next }   # skip header/comment lines
 
     {
@@ -73,10 +73,10 @@ process DSA {
     }'
 
     # append to final output
-    cat \$file >> dsa_${part_i}.bed
+    zcat \$file.gz >> dsa_${part_i}.bed
 
     # remove intermediate
-    rm \$file
+    rm \$file.gz
 
   done
 
